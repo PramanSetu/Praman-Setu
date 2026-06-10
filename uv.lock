@@ -915,7 +915,7 @@ requires-dist = [
     { name = "docker", specifier = ">=7.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28" },
-    { name = "langgraph", specifier = ">=0.2.60" },
+    { name = "langgraph", specifier = ">=1.2.4" },
     { name = "openai", specifier = ">=1.59" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },

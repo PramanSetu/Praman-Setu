@@ -13,7 +13,7 @@ dependencies = [
     "openai>=1.59",          # Groq + Ollama are OpenAI-compatible (base_url swap)
     "python-multipart>=0.0.18",
     "docker>=7.1",           # SandboxPool talks to the Docker daemon
-    "langgraph>=0.2.60",
+    "langgraph>=1.2.4",
     # Heavier deps deferred until the modules that need them land, to keep the
     # dev image lean and boot fast:
     #   chromadb, sentence-transformers  -> Tool 5 (Bug Memory)
