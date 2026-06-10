@@ -10,14 +10,14 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "httpx[http2]>=0.28",
-    "openai>=1.59",          # Groq + Ollama are OpenAI-compatible (base_url swap)
     "python-multipart>=0.0.18",
     "docker>=7.1",           # SandboxPool talks to the Docker daemon
-    "langgraph>=0.2.60",
+    "langgraph>=1.2.4",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python>=0.23.0",
     # Heavier deps deferred until the modules that need them land, to keep the
     # dev image lean and boot fast:
     #   chromadb, sentence-transformers  -> Tool 5 (Bug Memory)
-    #   tree-sitter, tree-sitter-languages -> Tool 2 (Context Builder), Tool 3 (Validator)
     #   faiss-cpu                         -> repo-mode embedding index
 ]
 
@@ -34,3 +34,6 @@ package = false   # this is an application, not an installable library
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

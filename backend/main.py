@@ -6,9 +6,12 @@ FINAL_ARCHITECTURE.md are built on top of this scaffold in subsequent steps.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
+from backend.input_handler import ProcessedInput, RawInput, smart_input_handler
+from backend.input_handler.detector import UnsupportedLanguageError
 
 app = FastAPI(title="Praman Setu", version="0.1.0")
 
@@ -34,3 +37,11 @@ def health() -> dict[str, object]:
         "groq_configured": bool(settings.groq_api_key),
         "sandbox_timeout": settings.sandbox_timeout,
     }
+
+
+@app.post("/api/input/handle")
+async def handle_input(payload: RawInput) -> ProcessedInput:
+    try:
+        return await smart_input_handler.handle(payload)
+    except UnsupportedLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

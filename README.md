@@ -17,7 +17,8 @@ agent/tool/orchestrator layers are built on top of it incrementally.
 ## Prerequisites
 
 - Docker Desktop (with the WSL2 backend on Windows)
-- A [Groq](https://console.groq.com) API key (free tier)
+- A [Groq](https://console.groq.com) API key. Configure your Groq account with
+  no billing method or strict spend limits if you want free-tier-only usage.
 
 ## Quick start
 
