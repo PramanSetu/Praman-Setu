@@ -1741,7 +1741,7 @@ These are real. Naming them in the pitch demonstrates engineering maturity.
 
 ### The Headline (for slides + judge questions)
 
-> **"PatchMind: 5 agents, 7 tools, 1 hardened sandbox. ~9 seconds end-to-end. Runtime execution tracing inside a network-isolated container. Three ranked hypotheses with auto-generated failing test in one call. Parallel Critic + Explainer for zero-cost quality. Diff-based security regression detection. Persistent bug memory that compounds quality over time. Tier-1 support for 6 languages, universal fallback for 100+ via tree-sitter."**
+> **"Praman Setu: 5 agents, 7 tools, 1 hardened sandbox. ~9 seconds end-to-end. Runtime execution tracing inside a network-isolated container. Three ranked hypotheses with auto-generated failing test in one call. Parallel Critic + Explainer for zero-cost quality. Diff-based security regression detection. Persistent bug memory that compounds quality over time. Tier-1 support for 6 languages, universal fallback for 100+ via tree-sitter."**
 
 ### Why Each Phrase Matters to Judges
 
@@ -1765,7 +1765,7 @@ A: We add an agent only when its quality contribution justifies its latency cost
 A: LangChain's abstractions are designed for arbitrary tool-using chains. Our flow is fixed and well-understood: diagnose → patch → validate → critique+explain. LangGraph's typed state machine gives us better debuggability and observability for exactly this pattern. LangChain would add abstraction overhead without adding capability.
 
 **Q: "How is this different from Cursor / GitHub Copilot?"**
-A: Copilot suggests; we *prove*. Copilot generates code based on context. We generate code, run it in a hardened sandbox against a test we also generated, scan it for security regressions, and have a Critic LLM review it before showing the user. Copilot is a productivity multiplier for happy-path code writing. PatchMind is a correctness-first tool for cases where wrong fixes are worse than no fix.
+A: Copilot suggests; we *prove*. Copilot generates code based on context. We generate code, run it in a hardened sandbox against a test we also generated, scan it for security regressions, and have a Critic LLM review it before showing the user. Copilot is a productivity multiplier for happy-path code writing. Praman Setu is a correctness-first tool for cases where wrong fixes are worse than no fix.
 
 **Q: "Your bug memory starts empty. How is that valuable?"**
 A: It's a compounding asset. Day 1, it provides zero value. Day 30, ~100 examples per common bug category meaningfully improve diagnosis. We frame this honestly: the system gets smarter the more you use it. For the demo, we pre-seed with 50 examples from our golden dataset.

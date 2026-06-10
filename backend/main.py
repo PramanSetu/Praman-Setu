@@ -1,4 +1,4 @@
-"""PatchMind backend entrypoint.
+"""Praman Setu backend entrypoint.
 
 Minimal runnable FastAPI app. The agent/tool/orchestrator layers from
 FINAL_ARCHITECTURE.md are built on top of this scaffold in subsequent steps.
@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
 
-app = FastAPI(title="PatchMind", version="0.1.0")
+app = FastAPI(title="Praman Setu", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +23,7 @@ app.add_middleware(
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"service": "PatchMind backend", "version": "0.1.0", "status": "up"}
+    return {"service": "Praman Setu backend", "version": "0.1.0", "status": "up"}
 
 
 @app.get("/health")

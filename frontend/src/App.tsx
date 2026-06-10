@@ -14,7 +14,7 @@ export function App() {
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
-      <h1>PatchMind</h1>
+      <h1>Praman Setu</h1>
       <p>Code generation + debug assistant — scaffold is up.</p>
       <p>
         Backend health: <strong>{health}</strong>

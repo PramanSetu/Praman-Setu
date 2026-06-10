@@ -1,4 +1,4 @@
-# PatchMind — local full-stack dev environment.
+# Praman Setu — local full-stack dev environment.
 #
 # Normal start (backend + frontend):
 #   docker compose up
@@ -52,6 +52,6 @@ services:
     build:
       context: ./sandbox
       dockerfile: Dockerfile.python
-    image: patchmind-sandbox-python:latest
+    image: praman-setu-sandbox-python:latest
     profiles:
       - manual

@@ -1,4 +1,4 @@
-# PatchMind
+# Praman Setu
 
 Code generation + debug assistant — **5 agents · 6 deterministic tools · 1 hardened sandbox**.
 See [FINAL_ARCHITECTURE.md](FINAL_ARCHITECTURE.md) for the full design.

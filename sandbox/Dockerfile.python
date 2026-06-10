@@ -1,4 +1,4 @@
-# PatchMind hardened Python sandbox image.
+# Praman Setu hardened Python sandbox image.
 #
 # This image is *spawned* by the backend's sandbox pool (Tool 4) to execute
 # untrusted user code, the execution tracer, and the validation gates. It is NOT

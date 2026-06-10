@@ -1,4 +1,4 @@
-# PatchMind backend — FastAPI + uvicorn, dependencies managed by uv (no venv/pip).
+# Praman Setu backend — FastAPI + uvicorn, dependencies managed by uv (no venv/pip).
 # Uses the official uv image so `uv` is preinstalled.
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 

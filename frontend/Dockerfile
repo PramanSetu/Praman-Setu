@@ -1,4 +1,4 @@
-# PatchMind frontend — Vite dev server with hot reload.
+# Praman Setu frontend — Vite dev server with hot reload.
 FROM node:20-bookworm-slim
 
 ENV CHOKIDAR_USEPOLLING=true \

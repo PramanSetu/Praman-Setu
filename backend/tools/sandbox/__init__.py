@@ -1,6 +1,6 @@
 """Tool 4 — the hardened execution sandbox (the chokepoint).
 
-Every code execution in PatchMind funnels through here: the execution tracer,
+Every code execution in Praman Setu funnels through here: the execution tracer,
 the validation gates, and any user-code invocation.
 """
 from backend.tools.sandbox.executor import SandboxResult

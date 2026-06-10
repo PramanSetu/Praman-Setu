@@ -23,7 +23,7 @@ class LanguageSpec:
 # Only Python exists today; more images get added as adapters land.
 LANGUAGES: dict[str, LanguageSpec] = {
     "python": LanguageSpec(
-        image="patchmind-sandbox-python:latest",
+        image="praman-setu-sandbox-python:latest",
         filename="main.py",
         run_cmd=["python", "main.py"],
     ),

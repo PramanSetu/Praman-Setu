@@ -70,7 +70,7 @@ def _bootstrap(filename: str, cmd: list[str]) -> list[str]:
     root — so no external copy API is needed.
     """
     script = (
-        f'printf "%s" "$PATCHMIND_CODE_B64" | base64 -d > /workspace/{filename} && '
+        f'printf "%s" "$PRAMAN_SETU_CODE_B64" | base64 -d > /workspace/{filename} && '
         f"exec {shlex.join(cmd)}"
     )
     return ["sh", "-c", script]
@@ -94,7 +94,7 @@ def run_in_container(
         image,
         command=["sleep", str(timeout + 10)],
         detach=True,
-        environment={"PATCHMIND_CODE_B64": code_b64},
+        environment={"PRAMAN_SETU_CODE_B64": code_b64},
         **_hardening_kwargs(),
     )
 

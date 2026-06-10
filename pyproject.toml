@@ -1,7 +1,7 @@
 [project]
-name = "patchmind"
+name = "praman-setu"
 version = "0.1.0"
-description = "PatchMind — code generation + debug assistant (5 agents, 6 tools, 1 hardened sandbox)"
+description = "Praman Setu — code generation + debug assistant (5 agents, 6 tools, 1 hardened sandbox)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
