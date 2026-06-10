@@ -1,0 +1,42 @@
+# PatchMind hardened Python sandbox image.
+#
+# This image is *spawned* by the backend's sandbox pool (Tool 4) to execute
+# untrusted user code, the execution tracer, and the validation gates. It is NOT
+# auto-started by docker-compose (it lives behind the `manual` profile).
+#
+# The runtime applies the real isolation flags (see FINAL_ARCHITECTURE.md §4.1):
+#   --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges
+#   --tmpfs=/tmp:size=64m,exec --tmpfs=/workspace-write:size=128m,exec
+#   --memory=512m --pids-limit=64 --user=1000:1000
+# This Dockerfile is built so the image runs correctly UNDER those flags even if
+# compose can't enforce all of them yet: non-root user, writable areas isolated
+# to tmpfs mount points, and code mounted read-only at /workspace.
+FROM python:3.11-slim-bookworm
+
+# Static-analysis + execution tooling available inside the sandbox.
+# (semgrep is heavy; pinned-by-floor for reproducibility — pin exact versions
+#  for production builds.)
+RUN pip install --no-cache-dir \
+        pytest \
+        mypy \
+        bandit \
+        "semgrep>=1.0"
+
+# Non-root user (uid 1000 matches the runtime `--user=1000:1000`).
+RUN useradd -m sandboxuser
+
+# /workspace        : user code, mounted READ-ONLY at runtime
+# /workspace-write  : tmpfs (writable scratch) at runtime
+# /tmp              : tmpfs at runtime
+# Create them now and hand ownership to the non-root user so the container works
+# under a read-only root filesystem with tmpfs mounts.
+RUN mkdir -p /workspace /workspace-write \
+    && chown -R sandboxuser:sandboxuser /workspace /workspace-write
+
+USER sandboxuser
+WORKDIR /workspace
+
+# Keep a warm container alive when started manually
+# (`docker compose --profile manual up sandbox`). Per-execution runs override
+# this with an explicit command from the pool.
+CMD ["sleep", "infinity"]

@@ -1,0 +1,36 @@
+[project]
+name = "patchmind"
+version = "0.1.0"
+description = "PatchMind — code generation + debug assistant (5 agents, 6 tools, 1 hardened sandbox)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx[http2]>=0.28",
+    "openai>=1.59",          # Groq + Ollama are OpenAI-compatible (base_url swap)
+    "python-multipart>=0.0.18",
+    "docker>=7.1",           # SandboxPool talks to the Docker daemon
+    "langgraph>=0.2.60",
+    # Heavier deps deferred until the modules that need them land, to keep the
+    # dev image lean and boot fast:
+    #   chromadb, sentence-transformers  -> Tool 5 (Bug Memory)
+    #   tree-sitter, tree-sitter-languages -> Tool 2 (Context Builder), Tool 3 (Validator)
+    #   faiss-cpu                         -> repo-mode embedding index
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "mypy>=1.14",
+    "ruff>=0.9",
+]
+
+[tool.uv]
+package = false   # this is an application, not an installable library
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,57 @@
+# PatchMind — local full-stack dev environment.
+#
+# Normal start (backend + frontend):
+#   docker compose up
+#
+# Build the sandbox image (NOT auto-started; spawned by the backend pool):
+#   docker compose build sandbox
+#
+services:
+  # -------------------------------------------------------------------------
+  # Backend — FastAPI + uvicorn, hot reload, port 8000.
+  # Mounts the Docker socket so the sandbox pool (Tool 4) can spawn sandbox
+  # containers on the host daemon (Docker-out-of-Docker). DEV ONLY: the socket
+  # grants the container root-equivalent control of the host daemon. For prod,
+  # use a remote/rootless daemon or gVisor (see FINAL_ARCHITECTURE.md §4.3).
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend          # hot reload of source
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Frontend — Vite dev server, hot reload, port 5173.
+  # -------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app                 # hot reload of source
+      - /app/node_modules               # keep image's node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Sandbox — hardened Python execution image. NOT auto-started: it lives behind
+  # the `manual` profile and is invoked per-execution by the backend pool.
+  # Build it with:  docker compose build sandbox
+  # -------------------------------------------------------------------------
+  sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile.python
+    image: patchmind-sandbox-python:latest
+    profiles:
+      - manual
