@@ -126,6 +126,7 @@ async def test_run_patcher_uses_selected_hypothesis_and_retry_constraint():
 
     diagnosis = captured["diagnosis"]
     assert result["patcher_output"].approach == "captured patch"
+    assert result["patch_history"] == [result["patcher_output"]]
     assert diagnosis.hypotheses[0].id == "H2"
     assert diagnosis.hypotheses[0].fix_direction.startswith("f2")
     assert "preserve the return type expected by mypy" in diagnosis.hypotheses[0].fix_direction
@@ -153,7 +154,7 @@ async def test_run_validator_calls_real_five_gate_adapter_and_populates_report()
     ) as mock_validator:
         result = await run_validator(state)
 
-    assert result == {"validator_report": expected_report}
+    assert result == {"validator_report": expected_report, "validation_history": [expected_report]}
     mock_validator.assert_awaited_once_with(
         state.patcher_output,
         state.context_package,
