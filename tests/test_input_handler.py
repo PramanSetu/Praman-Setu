@@ -124,7 +124,12 @@ def test_auto_executes_when_error_is_missing() -> None:
 
     result = asyncio.run(handler.handle(RawInput(code="print(missing)", filename="main.py")))
 
-    assert sandbox.calls == [("python", "print(missing)")]
+    # The handler runs the code once, via the tracer harness (which embeds the
+    # user source), so the sandbox sees the harness rather than the raw snippet.
+    assert len(sandbox.calls) == 1
+    language, executed = sandbox.calls[0]
+    assert language == "python"
+    assert "print(missing)" in executed
     assert result.status == "execution_failed"
     assert result.error_message == "NameError: name 'missing' is not defined"
     assert result.raw_stderr == "NameError: name 'missing' is not defined"

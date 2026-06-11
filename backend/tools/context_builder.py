@@ -1,17 +1,18 @@
-"""Deterministic context assembly for the Phase 1 pipeline."""
+"""Deterministic context assembly for the Phase 1 pipeline.
+
+Consumes the evidence the Smart Input Handler already gathered (including the
+execution tracer's variable snapshots) and adds tree-sitter AST extraction. It
+does NOT execute user code — execution happens exactly once, in the handler.
+"""
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
-from typing import Protocol
 
 import tree_sitter_python as tspython
 from tree_sitter import Language, Node, Parser, Tree
 
 from backend.orchestrator.state import ContextPackage, ProcessedInput
-from backend.tools.sandbox.executor import SandboxResult
-from backend.tools.sandbox.pool import sandbox_pool
 
 
 ERROR_WINDOW_LINES = 10
@@ -25,27 +26,16 @@ class AstContext:
     imports: list[str]
 
 
-class SandboxExecutor(Protocol):
-    async def execute(
-        self,
-        language: str,
-        code: str,
-        cmd: list[str] | None = None,
-        timeout: int | None = None,
-    ) -> SandboxResult: ...
-
-
 class ContextBuilder:
     """Build the smallest useful evidence packet before any LLM call."""
 
-    def __init__(self, sandbox: SandboxExecutor = sandbox_pool) -> None:
-        self.sandbox = sandbox
+    def __init__(self) -> None:
         self._language = Language(tspython.language())
         self._parser = Parser(self._language)
 
     async def build(self, processed: ProcessedInput) -> ContextPackage:
-        trace = await self._get_runtime_trace(processed.code, processed.language)
-        error_line = trace.get("error_line") or processed.error_line or 1
+        trace = _runtime_trace(processed)
+        error_line = processed.error_line or 1
         ast_context = await asyncio.to_thread(self._extract_ast, processed.code, error_line)
 
         return ContextPackage(
@@ -55,30 +45,6 @@ class ContextBuilder:
             runtime_trace=trace,
             language=processed.language,
         )
-
-    async def _get_runtime_trace(self, code: str, language: str = "python") -> dict:
-        result = await self.sandbox.execute(language, code)
-        stderr = result.stderr or ""
-
-        error_type = "Unknown"
-        error_message = ""
-        lines = stderr.strip().splitlines()
-        if lines:
-            match = re.match(r"^(\w+):\s*(.*)$", lines[-1].strip())
-            if match:
-                error_type, error_message = match.groups()
-
-        line_matches = re.findall(r'File ".*?", line (\d+)', stderr)
-        if not line_matches:
-            line_matches = re.findall(r"line (\d+)", stderr)
-        error_line = int(line_matches[-1]) if line_matches else None
-
-        return {
-            "error_type": error_type,
-            "error_message": error_message,
-            "error_line": error_line,
-            "raw_stderr": stderr,
-        }
 
     def _extract_ast(self, code: str, error_line: int) -> AstContext:
         encoded = code.encode("utf8")
@@ -164,6 +130,30 @@ def _bounded_target_row(error_line: int, line_count: int) -> int:
 
 def _node_text(encoded: bytes, start_byte: int, end_byte: int) -> str:
     return encoded[start_byte:end_byte].decode("utf8", errors="replace")
+
+
+def _runtime_trace(processed: ProcessedInput) -> dict:
+    """Assemble the Diagnoser-facing trace from the handler's evidence.
+
+    Single source of truth: error fields come from the handler's parse, the
+    variable snapshots from the execution tracer. No re-execution.
+    """
+    return {
+        "error_type": processed.error_type,
+        "error_message": _message_only(processed.error_message, processed.error_type),
+        "error_line": processed.error_line,
+        "raw_stderr": processed.raw_stderr,
+        "captured_variables": processed.captured_variables,
+        "crash_locals": processed.crash_locals,
+        "snapshots": processed.trace_snapshots,
+    }
+
+
+def _message_only(error_message: str, error_type: str | None) -> str:
+    """Strip a leading ``ExceptionType: `` prefix, leaving just the message."""
+    if error_type and error_message.startswith(f"{error_type}:"):
+        return error_message[len(error_type) + 1 :].strip()
+    return error_message
 
 
 context_builder = ContextBuilder()

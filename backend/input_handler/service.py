@@ -13,11 +13,13 @@ from backend.input_handler.models import (
     RawInput,
     SandboxExecution,
 )
-from backend.tools.sandbox.pool import SandboxPool, sandbox_pool
+from backend.orchestrator.state import ProcessedStatus
+from backend.tools.sandbox.pool import sandbox_pool
+from backend.tools.tracer import SandboxExecutor, trace_execution
 
 
 class SmartInputHandler:
-    def __init__(self, sandbox: SandboxPool = sandbox_pool) -> None:
+    def __init__(self, sandbox: SandboxExecutor = sandbox_pool) -> None:
         self._sandbox = sandbox
 
     async def handle(self, request: RawInput) -> ProcessedInput:
@@ -26,19 +28,33 @@ class SmartInputHandler:
 
         execution: SandboxExecution | None = None
         raw_error = _blank_to_none(request.error_message) or ""
-        status = "ready"
+        status: ProcessedStatus = "ready"
+        captured_variables = False
+        crash_locals: dict[str, str] | None = None
+        trace_snapshots: list[dict] = []
 
+        # Only execute when the user did NOT supply an error (Mode B). This is the
+        # system's single user-code run; the Context Builder consumes its output.
         if not raw_error:
-            sandbox_result = await self._sandbox.execute(detection.language, request.code)
-            execution = SandboxExecution.model_validate(sandbox_result.model_dump())
-            if sandbox_result.timed_out:
+            trace = await trace_execution(detection.language, request.code, self._sandbox)
+            execution = SandboxExecution(
+                exit_code=trace.exit_code,
+                stdout=trace.stdout,
+                stderr=trace.raw_stderr,
+                timed_out=trace.timed_out,
+                duration_s=trace.duration_s,
+            )
+            captured_variables = trace.captured_variables
+            crash_locals = trace.crash_locals
+            trace_snapshots = trace.snapshots
+            if trace.timed_out:
                 status = "execution_timeout"
-                raw_error = sandbox_result.stderr or "sandbox: timed out"
-            elif sandbox_result.exit_code == 0:
-                status = "execution_clean"
-            else:
+                raw_error = trace.raw_stderr or "sandbox: timed out"
+            elif trace.crashed:
                 status = "execution_failed"
-                raw_error = sandbox_result.stderr or sandbox_result.stdout
+                raw_error = trace.raw_stderr
+            else:
+                status = "execution_clean"
 
         error_type = extract_error_type(raw_error) if raw_error else None
 
@@ -56,6 +72,9 @@ class SmartInputHandler:
             fast_path_eligible=is_fast_path_eligible(error_type, line_count),
             execution=execution,
             status=status,
+            captured_variables=captured_variables,
+            crash_locals=crash_locals,
+            trace_snapshots=trace_snapshots,
         )
 
 

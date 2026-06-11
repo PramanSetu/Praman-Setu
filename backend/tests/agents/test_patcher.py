@@ -184,7 +184,7 @@ def test_integration_full_pipeline_input_to_patcher_with_mocked_llms() -> None:
     processed = asyncio.run(
         SmartInputHandler(sandbox=sandbox).handle(RawInput(code=code, filename="main.py"))
     )
-    context = asyncio.run(ContextBuilder(sandbox=sandbox).build(processed))
+    context = asyncio.run(ContextBuilder().build(processed))
     diagnosis = asyncio.run(
         DiagnoserAgent(FakeLLMClient([_diagnosis()])).diagnose(context)
     )

@@ -7,6 +7,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+# Single source of truth for the handler's pipeline status values.
+ProcessedStatus = Literal["ready", "execution_clean", "execution_failed", "execution_timeout"]
+
+
 class DetectionMethod(str, Enum):
     EXTENSION = "extension"
     SHEBANG = "shebang"
@@ -41,7 +45,12 @@ class ProcessedInput(BaseModel):
     raw_stderr: str
     fast_path_eligible: bool
     execution: SandboxExecution | None
-    status: Literal["ready", "execution_clean", "execution_failed", "execution_timeout"]
+    status: ProcessedStatus
+    # Execution-tracer evidence (Context Builder Subtask A). Empty when the user
+    # supplied the error and we did not execute, or for tier-degraded runs.
+    captured_variables: bool = False
+    crash_locals: dict[str, str] | None = None
+    trace_snapshots: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ContextPackage(BaseModel):
