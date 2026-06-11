@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend.llm.models import model_for
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -23,9 +24,11 @@ class LLMCompleter(Protocol):
 
     async def complete(self, *args: Any, **kwargs: Any) -> Any: ...
 
+
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_PRIMARY_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-OLLAMA_FALLBACK_MODEL = "llama3.1:8b"
+# Back-compat aliases sourced from the registry (single source of truth).
+GROQ_PRIMARY_MODEL = model_for("diagnoser").primary
+OLLAMA_FALLBACK_MODEL = model_for("diagnoser").fallback
 
 
 class LLMClient:

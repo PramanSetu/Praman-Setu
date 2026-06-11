@@ -24,6 +24,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "pytest-asyncio>=0.24",
     "mypy>=1.14",
     "ruff>=0.9",
 ]
@@ -45,3 +46,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "integration: exercises the real Docker sandbox / live LLM (opt-in)",
+]
+# Integration tests are opt-in; run them with: pytest -m integration
+addopts = "-m 'not integration'"
