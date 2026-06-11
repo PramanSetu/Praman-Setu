@@ -11,12 +11,13 @@ from pydantic import ValidationError
 
 from backend.agents.prompts.patcher_prompt import LLMPatchResponse, render_patcher_prompt
 from backend.llm.client import LLMCompleter
+from backend.llm.models import model_for
 from backend.orchestrator.state import ContextPackage, DiagnoserOutput, PatcherOutput
 
 
 LOGGER = logging.getLogger(__name__)
-GROQ_PATCHER_MODEL = "qwen/qwen3-32b"
-OLLAMA_PATCHER_FALLBACK_MODEL = "qwen2.5-coder:14b"
+GROQ_PATCHER_MODEL = model_for("patcher").primary
+OLLAMA_PATCHER_FALLBACK_MODEL = model_for("patcher").fallback
 
 
 class PatcherError(Exception):
@@ -28,9 +29,15 @@ class PatcherAgent:
         self.llm = llm_client
 
     async def patch(self, context: ContextPackage, diagnosis: DiagnoserOutput) -> PatcherOutput:
-        patch_context = context.model_copy(
-            update={"error_node": _extract_first_function_source(context.error_node) or context.error_node}
+        # Patch the full enclosing function. Prefer the Context Builder's exact
+        # function source; fall back to extracting from the error window for unit
+        # fixtures that don't populate function_source.
+        target_source = (
+            context.function_source
+            or _extract_first_function_source(context.error_node)
+            or context.error_node
         )
+        patch_context = context.model_copy(update={"error_node": target_source})
         messages = render_patcher_prompt(patch_context, diagnosis)
         first_error: Exception
         try:
@@ -95,6 +102,7 @@ class PatcherAgent:
             unified_diff=unified_diff,
             confidence=response.confidence,
             approach=response.approach,
+            patched_code=patched_code,
         )
 
 

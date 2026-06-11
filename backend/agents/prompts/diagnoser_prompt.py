@@ -61,7 +61,7 @@ Confidence scores must be calibrated as follows: H1 between 0.6 and 0.95, H2 bet
 The root_cause must be one sentence.
 The generated_test must be a NON-EMPTY string containing standalone pytest code, not inside a class.
 The generated_test must include a function whose name starts with def test_.
-The generated_test must import or reference the buggy function correctly, trigger the EXACT error from runtime evidence, use pytest.raises({trace.get("error_type")}) for exceptions, be runnable without modification, and include a docstring explaining what it tests.
+The generated_test must reference the buggy function DIRECTLY by name — it is defined in the SAME file as the test, so do NOT import it (no `from user_code import ...`). Trigger the EXACT error from runtime evidence, use pytest.raises({trace.get("error_type")}) for exceptions, be runnable without modification, and include a docstring explaining what it tests.
 """
 
     return [

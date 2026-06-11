@@ -24,6 +24,7 @@ class AstContext:
     error_node: str
     function_signature: str
     imports: list[str]
+    function_source: str
 
 
 class ContextBuilder:
@@ -44,6 +45,8 @@ class ContextBuilder:
             imports=ast_context.imports,
             runtime_trace=trace,
             language=processed.language,
+            full_code=processed.code,
+            function_source=ast_context.function_source,
         )
 
     def _extract_ast(self, code: str, error_line: int) -> AstContext:
@@ -52,20 +55,28 @@ class ContextBuilder:
         lines = code.splitlines()
         target_row = _bounded_target_row(error_line, len(lines))
 
+        func_node = _find_enclosing_function(tree.root_node, target_row)
         return AstContext(
             error_node=_line_window(lines, target_row),
-            function_signature=self._function_signature(tree, encoded, lines, target_row),
+            function_signature=self._function_signature(func_node, encoded, lines, target_row),
             imports=self._top_level_imports(tree, encoded),
+            # Full enclosing function source so the Validator can splice the patch
+            # back into the module. Falls back to the whole module when the error is
+            # module-level (no enclosing function).
+            function_source=(
+                _node_text(encoded, func_node.start_byte, func_node.end_byte)
+                if func_node is not None
+                else code
+            ),
         )
 
     def _function_signature(
         self,
-        tree: Tree,
+        func_node: Node | None,
         encoded: bytes,
         lines: list[str],
         target_row: int,
     ) -> str:
-        func_node = _find_enclosing_function(tree.root_node, target_row)
         if func_node is None:
             return _nearest_preceding_function_signature(lines, target_row)
 
