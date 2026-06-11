@@ -8,7 +8,6 @@ from backend.agents.diagnoser import DiagnoserAgent, DiagnoserError
 from backend.input_handler.models import DetectionMethod, LanguageDetection
 from backend.orchestrator.state import ContextPackage, DiagnoserOutput, Hypothesis, ProcessedInput
 from backend.tools.context_builder import ContextBuilder
-from backend.tools.sandbox.executor import SandboxResult
 
 
 class FakeLLMClient:
@@ -22,14 +21,6 @@ class FakeLLMClient:
         if isinstance(response, Exception):
             raise response
         return response
-
-
-class FakeSandbox:
-    def __init__(self, result: SandboxResult) -> None:
-        self.result = result
-
-    async def execute(self, language: str, code: str, cmd=None, timeout=None) -> SandboxResult:
-        return self.result
 
 
 def _context(
@@ -221,19 +212,7 @@ def test_integration_with_real_context_builder_structurally_valid() -> None:
         '  File "main.py", line 2, in divide\n    return a / b\n'
         "ZeroDivisionError: division by zero"
     )
-    context = asyncio.run(
-        ContextBuilder(
-            sandbox=FakeSandbox(
-                SandboxResult(
-                    exit_code=1,
-                    stdout="",
-                    stderr=stderr,
-                    timed_out=False,
-                    duration_s=0.01,
-                )
-            )
-        ).build(_processed_input(code, stderr))
-    )
+    context = asyncio.run(ContextBuilder().build(_processed_input(code, stderr)))
 
     result = asyncio.run(DiagnoserAgent(FakeLLMClient([_output()])).diagnose(context))
 

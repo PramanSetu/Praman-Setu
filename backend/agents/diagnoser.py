@@ -1,4 +1,4 @@
-"""Diagnoser Agent for the PatchMind pipeline."""
+"""Diagnoser Agent for the Praman Setu pipeline."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from backend.agents.prompts.diagnoser_prompt import render_diagnoser_prompt
-from backend.llm.client import GROQ_PRIMARY_MODEL, LLMClient
+from backend.llm.client import GROQ_PRIMARY_MODEL, LLMCompleter
 from backend.orchestrator.state import ContextPackage, DiagnoserOutput, Hypothesis
 
 
@@ -16,7 +16,7 @@ class DiagnoserError(Exception):
 
 
 class DiagnoserAgent:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMCompleter):
         self.llm = llm_client
 
     async def diagnose(self, context: ContextPackage) -> DiagnoserOutput:

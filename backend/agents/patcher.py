@@ -1,4 +1,4 @@
-"""Patcher Agent for the PatchMind pipeline."""
+"""Patcher Agent for the Praman Setu pipeline."""
 from __future__ import annotations
 
 import ast
@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from backend.agents.prompts.patcher_prompt import LLMPatchResponse, render_patcher_prompt
-from backend.llm.client import LLMClient
+from backend.llm.client import LLMCompleter
 from backend.orchestrator.state import ContextPackage, DiagnoserOutput, PatcherOutput
 
 
@@ -24,7 +24,7 @@ class PatcherError(Exception):
 
 
 class PatcherAgent:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMCompleter):
         self.llm = llm_client
 
     async def patch(self, context: ContextPackage, diagnosis: DiagnoserOutput) -> PatcherOutput:
@@ -32,6 +32,7 @@ class PatcherAgent:
             update={"error_node": _extract_first_function_source(context.error_node) or context.error_node}
         )
         messages = render_patcher_prompt(patch_context, diagnosis)
+        first_error: Exception
         try:
             response = await self._complete(messages)
             return self._build_output(patch_context, response)

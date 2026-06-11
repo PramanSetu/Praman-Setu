@@ -1,4 +1,4 @@
-"""Prompt rendering for the PatchMind Diagnoser agent."""
+"""Prompt rendering for the Praman Setu Diagnoser agent."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from backend.orchestrator.state import ContextPackage, DiagnoserOutput
 
 
 SYSTEM_PROMPT = (
-    "You are PatchMind Diagnoser, an expert Python debugging assistant. "
+    "You are Praman Setu Diagnoser, an expert Python debugging assistant. "
     "Your job is to analyze buggy code context and produce a structured diagnosis "
     "with 3 ranked hypotheses and a failing test."
 )
@@ -22,6 +22,7 @@ def render_diagnoser_prompt(
     trace = context.runtime_trace
     schema = json.dumps(DiagnoserOutput.model_json_schema(), indent=2)
     imports = "\n".join(context.imports) if context.imports else "<none>"
+    variables_block = _format_crash_variables(trace)
 
     retry_instruction = ""
     if retry:
@@ -45,7 +46,7 @@ RUNTIME EVIDENCE
 error_type: {trace.get("error_type")}
 error_message: {trace.get("error_message")}
 error_line: {trace.get("error_line")}
-raw_stderr:
+{variables_block}raw_stderr:
 {trace.get("raw_stderr")}
 
 DIAGNOSER OUTPUT JSON SCHEMA
@@ -67,3 +68,17 @@ The generated_test must import or reference the buggy function correctly, trigge
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _format_crash_variables(trace: dict) -> str:
+    """Render observed variable values at the crash point, when the tracer ran.
+
+    This is the execution tracer's payoff: real values, not speculation.
+    """
+    if not trace.get("captured_variables"):
+        return ""
+    crash_locals = trace.get("crash_locals") or {}
+    if not crash_locals:
+        return ""
+    rendered = "\n".join(f"  {name} = {value}" for name, value in crash_locals.items())
+    return f"observed_variables_at_crash:\n{rendered}\n"

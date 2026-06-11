@@ -1,4 +1,4 @@
-"""Real pipeline smoke test for Input Handler -> Context Builder -> Diagnoser -> Patcher.
+"""Real Praman Setu pipeline smoke test: Input Handler -> Context Builder -> Diagnoser -> Patcher.
 
 Requires:
 - Docker running

@@ -9,29 +9,6 @@ from backend.input_handler.models import (
 )
 from backend.orchestrator.state import ContextPackage
 from backend.tools.context_builder import ContextBuilder
-from backend.tools.sandbox.executor import SandboxResult
-
-
-class FakeSandbox:
-    def __init__(self, result: SandboxResult) -> None:
-        self.result = result
-        self.calls: list[tuple[str, str]] = []
-
-    async def execute(self, language: str, code: str, cmd=None, timeout=None) -> SandboxResult:
-        self.calls.append((language, code))
-        return self.result
-
-
-def _sandbox(stderr: str, *, exit_code: int = 1, stdout: str = "") -> FakeSandbox:
-    return FakeSandbox(
-        SandboxResult(
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            timed_out=False,
-            duration_s=0.01,
-        )
-    )
 
 
 def _processed_input(
@@ -41,6 +18,9 @@ def _processed_input(
     error_message: str = "ZeroDivisionError: division by zero",
     error_line: int | None = 5,
     raw_stderr: str = "Traceback...\nZeroDivisionError: division by zero",
+    captured_variables: bool = False,
+    crash_locals: dict[str, str] | None = None,
+    trace_snapshots: list[dict] | None = None,
 ) -> ProcessedInput:
     return ProcessedInput(
         language="python",
@@ -61,7 +41,17 @@ def _processed_input(
         fast_path_eligible=False,
         execution=None,
         status="ready",
+        captured_variables=captured_variables,
+        crash_locals=crash_locals,
+        trace_snapshots=trace_snapshots or [],
     )
+
+
+def test_context_builder_does_not_execute_code() -> None:
+    # No sandbox is injected or used: the Context Builder is purely deterministic
+    # AST work over the handler's already-gathered evidence.
+    builder = ContextBuilder()
+    assert not hasattr(builder, "sandbox")
 
 
 def test_builds_context_package_for_function_error() -> None:
@@ -76,27 +66,51 @@ def test_builds_context_package_for_function_error() -> None:
             "print(divide(1, 0))",
         ]
     )
-    stderr = (
-        'Traceback (most recent call last):\n  File "main.py", line 7, in <module>\n'
-        '  File "main.py", line 5, in divide\n    return a / b\n'
+    raw_stderr = (
+        'Traceback (most recent call last):\n  File "user_code.py", line 7, in <module>\n'
+        '  File "user_code.py", line 5, in divide\n    return a / b\n'
         "ZeroDivisionError: division by zero"
     )
-    sandbox = _sandbox(stderr)
 
-    package = asyncio.run(ContextBuilder(sandbox=sandbox).build(_processed_input(code)))
+    package = asyncio.run(
+        ContextBuilder().build(_processed_input(code, raw_stderr=raw_stderr))
+    )
 
     assert isinstance(package, ContextPackage)
-    assert sandbox.calls == [("python", code)]
     assert package.language == "python"
     assert package.error_node == code
     assert package.function_signature == "def divide(a, b):"
     assert package.imports == ["import os", "from math import sqrt"]
     assert package.runtime_trace == {
         "error_type": "ZeroDivisionError",
-        "error_message": "division by zero",
+        "error_message": "division by zero",  # type prefix stripped
         "error_line": 5,
-        "raw_stderr": stderr,
+        "raw_stderr": raw_stderr,
+        "captured_variables": False,
+        "crash_locals": None,
+        "snapshots": [],
     }
+
+
+def test_runtime_trace_carries_captured_variables() -> None:
+    code = "def divide(a, b):\n    return a / b\n\ndivide(1, 0)"
+    snapshots = [{"line": 2, "locals": {"a": "1", "b": "0"}}]
+
+    package = asyncio.run(
+        ContextBuilder().build(
+            _processed_input(
+                code,
+                error_line=2,
+                captured_variables=True,
+                crash_locals={"a": "1", "b": "0"},
+                trace_snapshots=snapshots,
+            )
+        )
+    )
+
+    assert package.runtime_trace["captured_variables"] is True
+    assert package.runtime_trace["crash_locals"] == {"a": "1", "b": "0"}
+    assert package.runtime_trace["snapshots"] == snapshots
 
 
 def test_extracts_multiline_function_signature() -> None:
@@ -109,12 +123,8 @@ def test_extracts_multiline_function_signature() -> None:
             "    return numerator / denominator",
         ]
     )
-    sandbox = _sandbox(
-        'Traceback (most recent call last):\n  File "main.py", line 5, in calculate\n'
-        "ZeroDivisionError: division by zero"
-    )
 
-    package = asyncio.run(ContextBuilder(sandbox=sandbox).build(_processed_input(code, error_line=5)))
+    package = asyncio.run(ContextBuilder().build(_processed_input(code, error_line=5)))
 
     assert package.function_signature == "def calculate(\n    numerator,\n    denominator,\n):"
 
@@ -129,12 +139,8 @@ def test_extracts_top_level_imports_only() -> None:
             "    return sys.path",
         ]
     )
-    sandbox = _sandbox(
-        'Traceback (most recent call last):\n  File "main.py", line 4, in load\n'
-        "NameError: name 'sys' is not defined"
-    )
 
-    package = asyncio.run(ContextBuilder(sandbox=sandbox).build(_processed_input(code, error_line=4)))
+    package = asyncio.run(ContextBuilder().build(_processed_input(code, error_line=4)))
 
     assert package.imports == ["import os"]
     assert package.function_signature == "def load():"
@@ -151,16 +157,15 @@ def test_handles_broken_python_with_tree_sitter() -> None:
             "    return (",
         ]
     )
-    sandbox = _sandbox('  File "main.py", line 6\nSyntaxError: invalid syntax')
 
     package = asyncio.run(
-        ContextBuilder(sandbox=sandbox).build(
+        ContextBuilder().build(
             _processed_input(
                 code,
                 error_type="SyntaxError",
                 error_message="SyntaxError: invalid syntax",
                 error_line=4,
-                raw_stderr='  File "main.py", line 4\nSyntaxError: invalid syntax',
+                raw_stderr='  File "user_code.py", line 4\nSyntaxError: invalid syntax',
             )
         )
     )
@@ -173,10 +178,9 @@ def test_handles_broken_python_with_tree_sitter() -> None:
 
 def test_error_node_is_bounded_to_ten_lines() -> None:
     code = "\n".join(f"line_{index}" for index in range(1, 21))
-    sandbox = _sandbox('Traceback...\n  File "main.py", line 12\nNameError: name x is not defined')
 
     package = asyncio.run(
-        ContextBuilder(sandbox=sandbox).build(
+        ContextBuilder().build(
             _processed_input(
                 code,
                 error_type="NameError",
@@ -192,10 +196,9 @@ def test_error_node_is_bounded_to_ten_lines() -> None:
 
 def test_defaults_missing_error_line_to_first_line_for_extraction() -> None:
     code = "print('ok')\nprint('still ok')"
-    sandbox = _sandbox("", exit_code=0, stdout="ok\nstill ok\n")
 
     package = asyncio.run(
-        ContextBuilder(sandbox=sandbox).build(
+        ContextBuilder().build(
             _processed_input(
                 code,
                 error_type=None,
@@ -208,32 +211,3 @@ def test_defaults_missing_error_line_to_first_line_for_extraction() -> None:
 
     assert package.error_node == code
     assert package.runtime_trace["error_line"] is None
-
-
-def test_runtime_trace_parses_last_exception_line_and_last_file_line() -> None:
-    code = "def fail():\n    return 1 / 0\n\nfail()"
-    stderr = (
-        'Traceback (most recent call last):\n  File "main.py", line 4, in <module>\n'
-        '  File "main.py", line 2, in fail\n    return 1 / 0\n'
-        "ZeroDivisionError: division by zero"
-    )
-
-    package = asyncio.run(
-        ContextBuilder(sandbox=_sandbox(stderr)).build(
-            _processed_input(
-                code,
-                error_type=None,
-                error_message="",
-                error_line=None,
-                raw_stderr="",
-            )
-        )
-    )
-
-    assert package.runtime_trace == {
-        "error_type": "ZeroDivisionError",
-        "error_message": "division by zero",
-        "error_line": 2,
-        "raw_stderr": stderr,
-    }
-    assert package.function_signature == "def fail():"

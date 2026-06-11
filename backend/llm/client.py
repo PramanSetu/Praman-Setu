@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TypeVar
+from typing import Any, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -12,6 +12,16 @@ from backend.config import settings
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+class LLMCompleter(Protocol):
+    """Structural interface the agents depend on.
+
+    Declared with ``*args/**kwargs: Any`` so both the real ``LLMClient`` and test
+    fakes satisfy it without inheritance (mirrors the ``SandboxExecutor`` pattern).
+    """
+
+    async def complete(self, *args: Any, **kwargs: Any) -> Any: ...
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_PRIMARY_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -103,7 +113,7 @@ class LLMClient:
                 raise ValueError("GROQ_API_KEY is required for Groq completions")
             headers["Authorization"] = f"Bearer {self.groq_api_key}"
 
-        response_format = {"type": "json_object"}
+        response_format: dict[str, Any] = {"type": "json_object"}
         if endpoint == GROQ_CHAT_COMPLETIONS_URL and use_json_schema:
             response_format = {
                 "type": "json_schema",

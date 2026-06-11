@@ -1,4 +1,4 @@
-"""Prompt rendering for the PatchMind Patcher agent."""
+"""Prompt rendering for the Praman Setu Patcher agent."""
 from __future__ import annotations
 
 import json
@@ -14,7 +14,7 @@ class LLMPatchResponse(BaseModel):
     approach: str = Field(min_length=1)
 
 
-SYSTEM_PROMPT = """You are PatchMind Patcher, an expert Python code repair assistant. You write minimal, correct patches. You never change function signatures. You always make tests pass.
+SYSTEM_PROMPT = """You are Praman Setu Patcher, an expert Python code repair assistant. You write minimal, correct patches. You never change function signatures. You always make tests pass.
 
 RULES (never violate):
 1. Change MINIMUM lines necessary -- if you need more than 15 lines, explain why
