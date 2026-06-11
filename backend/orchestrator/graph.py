@@ -56,11 +56,16 @@ async def run_patcher(state: PipelineState) -> dict:
 
     patcher = PatcherAgent(LLMClient())
     output = await patcher.patch(state.context_package, diagnosis)
+    output = output.model_copy(update={"hypothesis_used": state.hypothesis_used})
 
     prompt_note = f"hypothesis={state.hypothesis_used}"
     if constraint:
         prompt_note += f"; retry_constraint={constraint}"
-    return {"patcher_output": output, "patcher_prompts": [prompt_note]}
+    return {
+        "patcher_output": output,
+        "patch_history": [output],
+        "patcher_prompts": [prompt_note],
+    }
 
 
 async def run_validator(state: PipelineState) -> dict:
@@ -72,7 +77,7 @@ async def run_validator(state: PipelineState) -> dict:
     report = await run_five_gate_validator(
         state.patcher_output, state.context_package, state.diagnoser_output
     )
-    return {"validator_report": report}
+    return {"validator_report": report, "validation_history": [report]}
 
 
 async def run_reflector(state: PipelineState) -> dict:

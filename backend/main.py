@@ -70,4 +70,8 @@ async def analyze(payload: RawInput) -> dict[str, object]:
         "validator_report": final.get("validator_report"),
         "retry_count": final.get("retry_count", 0),
         "human_review_flag": final.get("human_review_flag", False),
+        "hypothesis_used": final.get("hypothesis_used", "H1"),
+        "patch_history": final.get("patch_history", []),
+        "validation_history": final.get("validation_history", []),
+        "patcher_prompts": final.get("patcher_prompts", []),
     }

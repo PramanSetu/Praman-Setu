@@ -93,13 +93,17 @@ def build_test_module(patched_module: str, generated_test: str) -> str:
     return _strip_top_level_calls(patched_module) + "\n\n" + _strip_local_imports(generated_test)
 
 
-def splice_patched_module(context: ContextPackage, patched_function: str) -> str:
+def splice_patched_module(
+    context: ContextPackage,
+    patched_function: str,
+    patch_target_source: str = "",
+) -> str:
     """Rebuild the full module with the patched function in place.
 
-    Raises ValueError if the original function can't be located in the full module
+    Raises ValueError if the original target can't be located in the full module
     (so the Validator fails loudly instead of validating the wrong code).
     """
-    target = context.function_source or context.error_node
+    target = patch_target_source or context.function_source or context.error_node
     full = context.full_code or target
 
     if target and target in full:
@@ -122,9 +126,23 @@ async def run_validator(
         return _fail_report("Patch missing", "gate_1", "patcher produced no patched_code", 0.0)
 
     try:
-        patched_module = splice_patched_module(context_package, patched_function)
+        patched_module = splice_patched_module(
+            context_package,
+            patched_function,
+            patcher_output.patch_target_source,
+        )
     except ValueError as exc:
         return _fail_report("Patch apply failed", "gate_1", str(exc), time.time() - start)
+
+    guard_failure = _patch_guard_failure(
+        patcher_output.patch_target_source
+        or context_package.function_source
+        or context_package.error_node,
+        patched_function,
+        context_package.runtime_trace.get("error_type"),
+    )
+    if guard_failure:
+        return _fail_report("Patch rejected", "gate_1", guard_failure, time.time() - start)
 
     # Gate 1 — syntax (fail-fast)
     tree = Parser(_PY_LANGUAGE).parse(patched_module.encode("utf8"))
@@ -132,6 +150,21 @@ async def run_validator(
     if tree.root_node.has_error:
         return _fail_report("Gate 1 failed: syntax error", "gate_1", "syntax error in patched code", g1_time)
     gate_results = {"gate_1": GateResult(passed=True, error=None, duration_s=g1_time)}
+
+    test_failure = _generated_test_guard_failure(diagnoser_output.generated_test)
+    if test_failure:
+        gate_results["gate_4"] = GateResult(
+            passed=False,
+            error=test_failure,
+            duration_s=time.time() - start,
+        )
+        return ValidatorReport(
+            overall_passed=False,
+            gate_results=gate_results,
+            safety_diff=None,
+            summary="Generated test rejected",
+            detailed_failures=[f"Gate 4 (pytest) failed: {test_failure}"],
+        )
 
     # Gates 2-4 in parallel
     test_module = build_test_module(patched_module, diagnoser_output.generated_test)
@@ -209,3 +242,123 @@ async def run_validator(
         summary="Passed" if overall else "Validation failed",
         detailed_failures=detailed_failures,
     )
+
+
+def _patch_guard_failure(
+    original_function: str,
+    patched_function: str,
+    original_error_type: str | None,
+) -> str | None:
+    if _normalize_code(original_function) == _normalize_code(patched_function):
+        return "patch is identical to the original code"
+    try:
+        module = ast.parse(patched_function)
+    except SyntaxError:
+        return None
+
+    if _is_only_stub_function(module):
+        return "patch replaces the function with an empty stub"
+    if _has_module_level_bare_call(module):
+        return "patch target includes module-level executable calls"
+    if _has_broad_exception_swallow(module):
+        return "patch swallows broad exceptions without handling the root cause"
+    if original_error_type and _explicitly_raises_error_type(module, original_error_type):
+        return f"patch explicitly raises the original runtime error {original_error_type}"
+    return None
+
+
+def _generated_test_guard_failure(generated_test: str) -> str | None:
+    if not generated_test.strip():
+        return "generated test is empty"
+    try:
+        module = ast.parse(generated_test)
+    except SyntaxError as exc:
+        return f"generated test has invalid syntax: {exc.msg}"
+
+    has_test_function = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+        for node in ast.walk(module)
+    )
+    if not has_test_function:
+        return "generated test must define a test_ function"
+    if not _has_assertion_or_pytest_raises(module):
+        return "generated test must contain an assert or pytest.raises"
+    return None
+
+
+def _normalize_code(code: str) -> str:
+    try:
+        return ast.unparse(ast.parse(code)).strip()
+    except SyntaxError:
+        return "\n".join(line.rstrip() for line in code.strip().splitlines())
+
+
+def _is_only_stub_function(module: ast.Module) -> bool:
+    functions = [
+        node for node in ast.walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if not functions:
+        return False
+    for func in functions:
+        body = [
+            node
+            for node in func.body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(getattr(node, "value", None), ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+        ]
+        if body and not all(isinstance(node, (ast.Pass, ast.Expr)) for node in body):
+            return False
+        if any(
+            isinstance(node, ast.Expr)
+            and not (
+                isinstance(getattr(node, "value", None), ast.Constant)
+                and node.value.value is Ellipsis
+            )
+            for node in body
+        ):
+            return False
+    return True
+
+
+def _has_broad_exception_swallow(module: ast.Module) -> bool:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        catches_broad = node.type is None or (
+            isinstance(node.type, ast.Name) and node.type.id in {"Exception", "BaseException"}
+        )
+        body_only_pass = bool(node.body) and all(isinstance(child, ast.Pass) for child in node.body)
+        if catches_broad and body_only_pass:
+            return True
+    return False
+
+
+def _has_module_level_bare_call(module: ast.Module) -> bool:
+    return any(isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) for node in module.body)
+
+
+def _explicitly_raises_error_type(module: ast.Module, error_type: str) -> bool:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        if isinstance(node.exc, ast.Call):
+            exc = node.exc.func
+        else:
+            exc = node.exc
+        if isinstance(exc, ast.Name) and exc.id == error_type:
+            return True
+    return False
+
+
+def _has_assertion_or_pytest_raises(module: ast.Module) -> bool:
+    for node in ast.walk(module):
+        if isinstance(node, ast.Assert):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "raises" and isinstance(node.func.value, ast.Name):
+                if node.func.value.id == "pytest":
+                    return True
+    return False

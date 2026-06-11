@@ -6,6 +6,7 @@ does NOT execute user code — execution happens exactly once, in the handler.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 from dataclasses import dataclass
 
@@ -22,9 +23,15 @@ MODULE_LEVEL = "<module-level>"
 @dataclass(frozen=True)
 class AstContext:
     error_node: str
+    error_window_with_lines: str
     function_signature: str
     imports: list[str]
     function_source: str
+    enclosing_class: str | None
+    enclosing_class_source: str | None
+    callers: list[str]
+    callees: list[str]
+    constants: list[str]
 
 
 class ContextBuilder:
@@ -41,10 +48,17 @@ class ContextBuilder:
 
         return ContextPackage(
             error_node=ast_context.error_node,
+            error_line=processed.error_line,
+            error_window_with_lines=ast_context.error_window_with_lines,
             function_signature=ast_context.function_signature,
             imports=ast_context.imports,
             runtime_trace=trace,
             language=processed.language,
+            enclosing_class=ast_context.enclosing_class,
+            enclosing_class_source=ast_context.enclosing_class_source,
+            callers=ast_context.callers,
+            callees=ast_context.callees,
+            constants=ast_context.constants,
             full_code=processed.code,
             function_source=ast_context.function_source,
         )
@@ -56,8 +70,10 @@ class ContextBuilder:
         target_row = _bounded_target_row(error_line, len(lines))
 
         func_node = _find_enclosing_function(tree.root_node, target_row)
+        enriched = _extract_python_ast_enrichment(code, target_row)
         return AstContext(
             error_node=_line_window(lines, target_row),
+            error_window_with_lines=_line_window_with_numbers(lines, target_row),
             function_signature=self._function_signature(func_node, encoded, lines, target_row),
             imports=self._top_level_imports(tree, encoded),
             # Full enclosing function source so the Validator can splice the patch
@@ -68,6 +84,11 @@ class ContextBuilder:
                 if func_node is not None
                 else code
             ),
+            enclosing_class=enriched.enclosing_class,
+            enclosing_class_source=enriched.enclosing_class_source,
+            callers=enriched.callers,
+            callees=enriched.callees,
+            constants=enriched.constants,
         )
 
     def _function_signature(
@@ -133,6 +154,20 @@ def _line_window(lines: list[str], target_row: int) -> str:
     return "\n".join(lines[start:end])
 
 
+def _line_window_with_numbers(lines: list[str], target_row: int) -> str:
+    if not lines:
+        return ""
+
+    before = ERROR_WINDOW_LINES // 2
+    start = max(0, target_row - before)
+    end = min(len(lines), start + ERROR_WINDOW_LINES)
+    start = max(0, end - ERROR_WINDOW_LINES)
+    width = len(str(end))
+    return "\n".join(
+        f"{line_no:>{width}} | {lines[line_no - 1]}" for line_no in range(start + 1, end + 1)
+    )
+
+
 def _bounded_target_row(error_line: int, line_count: int) -> int:
     if line_count <= 0:
         return 0
@@ -141,6 +176,149 @@ def _bounded_target_row(error_line: int, line_count: int) -> int:
 
 def _node_text(encoded: bytes, start_byte: int, end_byte: int) -> str:
     return encoded[start_byte:end_byte].decode("utf8", errors="replace")
+
+
+@dataclass(frozen=True)
+class PythonAstEnrichment:
+    enclosing_class: str | None
+    enclosing_class_source: str | None
+    callers: list[str]
+    callees: list[str]
+    constants: list[str]
+
+
+def _extract_python_ast_enrichment(code: str, target_row: int) -> PythonAstEnrichment:
+    """Best-effort same-file context for valid Python modules.
+
+    Tree-sitter keeps the basic context working for broken code. This stdlib AST
+    enrichment adds semantic same-file relationships when the module can be
+    parsed normally.
+    """
+    try:
+        module = ast.parse(code)
+    except SyntaxError:
+        return PythonAstEnrichment(None, None, [], [], [])
+
+    lines = code.splitlines()
+    parent: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(module):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    target_func = _enclosing_ast_function(module, target_row + 1)
+    target_name = target_func.name if target_func is not None else None
+    enclosing_class_node = _enclosing_ast_class(target_func, parent) if target_func else None
+    enclosing_class = _class_header_and_fields(lines, enclosing_class_node) if enclosing_class_node else None
+    enclosing_class_source = _node_source(lines, enclosing_class_node) if enclosing_class_node else None
+
+    functions = {
+        node.name: node
+        for node in ast.walk(module)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    call_names_by_function = {
+        name: _called_function_names(node) for name, node in functions.items()
+    }
+
+    callees: list[str] = []
+    if target_name:
+        for callee_name in sorted(call_names_by_function.get(target_name, set())):
+            callee_node = functions.get(callee_name)
+            if callee_node is not None:
+                callees.append(_node_source(lines, callee_node))
+
+    callers: list[str] = []
+    if target_name:
+        for caller_name, call_names in sorted(call_names_by_function.items()):
+            if caller_name != target_name and target_name in call_names:
+                caller_node = functions.get(caller_name)
+                if caller_node is not None:
+                    callers.append(_node_source(lines, caller_node))
+
+    return PythonAstEnrichment(
+        enclosing_class=enclosing_class,
+        enclosing_class_source=enclosing_class_source,
+        callers=_cap_context_items(callers),
+        callees=_cap_context_items(callees),
+        constants=_top_level_constants(module, lines),
+    )
+
+
+def _enclosing_ast_function(
+    module: ast.Module,
+    line_no: int,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    matches = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line_no <= (getattr(node, "end_lineno", node.lineno) or node.lineno)
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda node: node.lineno)
+
+
+def _enclosing_ast_class(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    parent: dict[ast.AST, ast.AST],
+) -> ast.ClassDef | None:
+    current: ast.AST | None = func_node
+    while current in parent:
+        current = parent[current]
+        if isinstance(current, ast.ClassDef):
+            return current
+    return None
+
+
+def _class_header_and_fields(lines: list[str], class_node: ast.ClassDef) -> str:
+    """Return compact class context without duplicating every method body."""
+    header = lines[class_node.lineno - 1].strip()
+    members: list[str] = []
+    for child in class_node.body:
+        if isinstance(child, (ast.AnnAssign, ast.Assign)):
+            members.append(_node_source(lines, child).strip())
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            members.append(lines[child.lineno - 1].strip())
+    return "\n".join([header, *members])
+
+
+def _called_function_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            if isinstance(child.func, ast.Name):
+                names.add(child.func.id)
+            elif isinstance(child.func, ast.Attribute):
+                names.add(child.func.attr)
+    return names
+
+
+def _top_level_constants(module: ast.Module, lines: list[str]) -> list[str]:
+    constants: list[str] = []
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if names and all(name.isupper() for name in names):
+                constants.append(_node_source(lines, node).strip())
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id.isupper():
+                constants.append(_node_source(lines, node).strip())
+    return _cap_context_items(constants, max_items=8)
+
+
+def _node_source(lines: list[str], node: ast.AST) -> str:
+    end_lineno = getattr(node, "end_lineno", None)
+    if end_lineno is None:
+        return lines[node.lineno - 1].strip()
+    return "\n".join(lines[node.lineno - 1 : end_lineno])
+
+
+def _cap_context_items(items: list[str], *, max_items: int = 4, max_chars: int = 1200) -> list[str]:
+    capped: list[str] = []
+    for item in items[:max_items]:
+        capped.append(item if len(item) <= max_chars else item[:max_chars].rstrip() + "\n...")
+    return capped
 
 
 def _runtime_trace(processed: ProcessedInput) -> dict:

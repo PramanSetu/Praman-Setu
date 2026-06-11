@@ -69,6 +69,8 @@ class DiagnoserAgent:
                 theory=hypothesis.theory,
                 confidence=hypothesis.confidence,
                 fix_direction=hypothesis.fix_direction,
+                evidence=hypothesis.evidence,
+                risk_if_wrong=hypothesis.risk_if_wrong,
             )
             for index, hypothesis in enumerate(sorted_hypotheses, start=1)
         ]
@@ -80,6 +82,11 @@ class DiagnoserAgent:
 
         return DiagnoserOutput(
             root_cause=output.root_cause,
+            affected_scope=output.affected_scope,
+            evidence=output.evidence,
             hypotheses=normalized_hypotheses,
             generated_test=output.generated_test,
+            test_assertion_summary=output.test_assertion_summary,
+            requires_clarification=output.requires_clarification,
+            clarification_question=output.clarification_question,
         )

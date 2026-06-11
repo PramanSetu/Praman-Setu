@@ -5,7 +5,8 @@ import ast
 import asyncio
 import difflib
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -29,20 +30,18 @@ class PatcherAgent:
         self.llm = llm_client
 
     async def patch(self, context: ContextPackage, diagnosis: DiagnoserOutput) -> PatcherOutput:
-        # Patch the full enclosing function. Prefer the Context Builder's exact
-        # function source; fall back to extracting from the error window for unit
-        # fixtures that don't populate function_source.
-        target_source = (
-            context.function_source
-            or _extract_first_function_source(context.error_node)
-            or context.error_node
+        target = _select_patch_target(context, diagnosis)
+        patch_context = context.model_copy(
+            update={
+                "error_node": target.source,
+                "function_signature": target.signature,
+            }
         )
-        patch_context = context.model_copy(update={"error_node": target_source})
         messages = render_patcher_prompt(patch_context, diagnosis)
         first_error: Exception
         try:
             response = await self._complete(messages)
-            return self._build_output(patch_context, response)
+            return self._build_output(patch_context, response, target)
         except PatcherError as exc:
             if "Signature changed" in str(exc):
                 raise
@@ -57,7 +56,7 @@ class PatcherAgent:
         retry_messages = render_patcher_prompt(patch_context, diagnosis, retry=True)
         try:
             response = await self._complete(retry_messages)
-            return self._build_output(patch_context, response)
+            return self._build_output(patch_context, response, target)
         except PatcherError as exc:
             raise PatcherError(f"Invalid patched_code after retry: {exc}") from exc
         except (ValidationError, ValueError, TypeError) as retry_error:
@@ -82,6 +81,7 @@ class PatcherAgent:
         self,
         context: ContextPackage,
         response: LLMPatchResponse | dict[str, Any],
+        target: "PatchTarget",
     ) -> PatcherOutput:
         if not isinstance(response, LLMPatchResponse):
             response = LLMPatchResponse.model_validate(response)
@@ -102,8 +102,45 @@ class PatcherAgent:
             unified_diff=unified_diff,
             confidence=response.confidence,
             approach=response.approach,
+            patch_target=target.kind,
+            patch_target_source=target.source,
+            hypothesis_used="H1",
+            lines_changed=changed_lines,
+            potential_side_effects=response.potential_side_effects,
+            api_signature_preserved=True,
+            new_imports_required=response.new_imports_required,
+            blocked_reason=response.blocked_reason,
             patched_code=patched_code,
         )
+
+
+@dataclass(frozen=True)
+class PatchTarget:
+    kind: Literal["function", "caller", "callee", "class"]
+    source: str
+    signature: str
+
+
+def _select_patch_target(context: ContextPackage, diagnosis: DiagnoserOutput) -> PatchTarget:
+    target_source = (
+        context.function_source
+        or _extract_first_function_source(context.error_node)
+        or context.error_node
+    )
+    target_kind = "function"
+
+    if diagnosis.affected_scope == "caller" and context.callers:
+        target_source = context.callers[0]
+        target_kind = "caller"
+    elif diagnosis.affected_scope == "callee" and context.callees:
+        target_source = context.callees[0]
+        target_kind = "callee"
+    elif diagnosis.affected_scope == "class" and context.enclosing_class_source:
+        target_source = context.enclosing_class_source
+        target_kind = "class"
+
+    signature = _extract_signature(target_source) or context.function_signature
+    return PatchTarget(kind=target_kind, source=target_source, signature=signature)
 
 
 def _validate_python_syntax(code: str) -> None:
