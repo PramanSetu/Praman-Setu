@@ -127,7 +127,7 @@ def _select_patch_target(context: ContextPackage, diagnosis: DiagnoserOutput) ->
         or _extract_first_function_source(context.error_node)
         or context.error_node
     )
-    target_kind = "function"
+    target_kind: Literal["function", "caller", "callee", "class"] = "function"
 
     if diagnosis.affected_scope == "caller" and context.callers:
         target_source = context.callers[0]

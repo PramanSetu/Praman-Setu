@@ -83,14 +83,36 @@ def _strip_local_imports(code: str) -> str:
     return ast.unparse(tree)
 
 
+def _ensure_pytest_import(code: str) -> str:
+    """Prepend `import pytest` when the test uses it but forgot to import it.
+
+    The LLM frequently writes `pytest.raises(...)` without `import pytest`, which
+    fails at runtime with NameError. Adding the import makes the test runnable.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    uses_pytest = any(isinstance(n, ast.Name) and n.id == "pytest" for n in ast.walk(tree))
+    has_import = any(
+        isinstance(n, ast.Import) and any(a.name == "pytest" for a in n.names)
+        for n in ast.walk(tree)
+    )
+    if uses_pytest and not has_import:
+        return "import pytest\n" + code
+    return code
+
+
 def build_test_module(patched_module: str, generated_test: str) -> str:
     """Module the test runs against.
 
     Drops the original's top-level crash reproduction (so importing the file for
-    pytest doesn't re-raise the bug at collection time) and strips the generated
-    test's redundant self-import of the function under test.
+    pytest doesn't re-raise the bug at collection time), strips the generated
+    test's redundant self-import of the function under test, and ensures pytest is
+    imported when the test relies on it.
     """
-    return _strip_top_level_calls(patched_module) + "\n\n" + _strip_local_imports(generated_test)
+    test = _ensure_pytest_import(_strip_local_imports(generated_test))
+    return _strip_top_level_calls(patched_module) + "\n\n" + test
 
 
 def splice_patched_module(
@@ -134,12 +156,17 @@ async def run_validator(
     except ValueError as exc:
         return _fail_report("Patch apply failed", "gate_1", str(exc), time.time() - start)
 
+    error_type = context_package.runtime_trace.get("error_type")
+    # A same-type raise is only a "cheat" when the test does NOT intend it. If the
+    # generated test asserts pytest.raises(<that type>), raising it is the contract.
+    test_expects_error = _test_expects_error_type(diagnoser_output.generated_test, error_type)
     guard_failure = _patch_guard_failure(
         patcher_output.patch_target_source
         or context_package.function_source
         or context_package.error_node,
         patched_function,
-        context_package.runtime_trace.get("error_type"),
+        error_type,
+        test_expects_error,
     )
     if guard_failure:
         return _fail_report("Patch rejected", "gate_1", guard_failure, time.time() - start)
@@ -248,6 +275,7 @@ def _patch_guard_failure(
     original_function: str,
     patched_function: str,
     original_error_type: str | None,
+    test_expects_error_type: bool = False,
 ) -> str | None:
     if _normalize_code(original_function) == _normalize_code(patched_function):
         return "patch is identical to the original code"
@@ -262,9 +290,37 @@ def _patch_guard_failure(
         return "patch target includes module-level executable calls"
     if _has_broad_exception_swallow(module):
         return "patch swallows broad exceptions without handling the root cause"
-    if original_error_type and _explicitly_raises_error_type(module, original_error_type):
+    if (
+        original_error_type
+        and not test_expects_error_type
+        and _explicitly_raises_error_type(module, original_error_type)
+    ):
         return f"patch explicitly raises the original runtime error {original_error_type}"
     return None
+
+
+def _test_expects_error_type(generated_test: str, error_type: str | None) -> bool:
+    """True if the generated test asserts ``pytest.raises(<error_type>)``.
+
+    When it does, the contract intends that exception, so the Patcher raising it is
+    correct — not a re-raise cheat.
+    """
+    if not error_type:
+        return False
+    try:
+        module = ast.parse(generated_test)
+    except SyntaxError:
+        return False
+    for node in ast.walk(module):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "raises"
+        ):
+            for arg in node.args:
+                if isinstance(arg, ast.Name) and arg.id == error_type:
+                    return True
+    return False
 
 
 def _generated_test_guard_failure(generated_test: str) -> str | None:
@@ -305,7 +361,7 @@ def _is_only_stub_function(module: ast.Module) -> bool:
             for node in func.body
             if not (
                 isinstance(node, ast.Expr)
-                and isinstance(getattr(node, "value", None), ast.Constant)
+                and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)
             )
         ]
@@ -313,10 +369,7 @@ def _is_only_stub_function(module: ast.Module) -> bool:
             return False
         if any(
             isinstance(node, ast.Expr)
-            and not (
-                isinstance(getattr(node, "value", None), ast.Constant)
-                and node.value.value is Ellipsis
-            )
+            and not (isinstance(node.value, ast.Constant) and node.value.value is Ellipsis)
             for node in body
         ):
             return False
@@ -341,16 +394,30 @@ def _has_module_level_bare_call(module: ast.Module) -> bool:
 
 
 def _explicitly_raises_error_type(module: ast.Module, error_type: str) -> bool:
+    """True only for an UNCONDITIONAL re-raise of the original error type.
+
+    A bare `raise ZeroDivisionError(...)` as a direct statement of the function (or
+    module) body is a non-fix. A GUARDED raise like `if b == 0: raise ZeroDivisionError`
+    is a legitimate validation fix and is allowed — Gate 4's test decides if it's
+    actually correct.
+    """
+    bodies: list[list[ast.stmt]] = [module.body]
     for node in ast.walk(module):
-        if not isinstance(node, ast.Raise) or node.exc is None:
-            continue
-        if isinstance(node.exc, ast.Call):
-            exc = node.exc.func
-        else:
-            exc = node.exc
-        if isinstance(exc, ast.Name) and exc.id == error_type:
-            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bodies.append(node.body)
+
+    for body in bodies:
+        for stmt in body:
+            if isinstance(stmt, ast.Raise) and _raises_named_type(stmt, error_type):
+                return True
     return False
+
+
+def _raises_named_type(node: ast.Raise, error_type: str) -> bool:
+    if node.exc is None:
+        return False
+    exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+    return isinstance(exc, ast.Name) and exc.id == error_type
 
 
 def _has_assertion_or_pytest_raises(module: ast.Module) -> bool:

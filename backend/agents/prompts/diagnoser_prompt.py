@@ -22,12 +22,9 @@ def render_diagnoser_prompt(
     trace = context.runtime_trace
     schema = json.dumps(DiagnoserOutput.model_json_schema(), indent=2)
     imports = "\n".join(context.imports) if context.imports else "<none>"
-    constants = "\n".join(context.constants) if context.constants else "<none>"
-    enclosing_class = context.enclosing_class or "<none>"
-    callers = _format_context_list(context.callers)
-    callees = _format_context_list(context.callees)
     error_location = context.error_window_with_lines or context.error_node
     variables_block = _format_crash_variables(trace)
+    optional_context = _optional_context_sections(context)
 
     retry_instruction = ""
     if retry:
@@ -47,22 +44,10 @@ ERROR LOCATION
 ENCLOSING FUNCTION
 {context.function_source or context.error_node}
 
-ENCLOSING CLASS
-{enclosing_class}
-
 AVAILABLE IMPORTS
 {imports}
 
-MODULE CONSTANTS
-{constants}
-
-SAME-FILE CALLEES FROM FAILING FUNCTION
-{callees}
-
-SAME-FILE CALLERS OF FAILING FUNCTION
-{callers}
-
-RUNTIME EVIDENCE
+{optional_context}RUNTIME EVIDENCE
 error_type: {trace.get("error_type")}
 error_message: {trace.get("error_message")}
 error_line: {trace.get("error_line")}
@@ -114,3 +99,17 @@ def _format_context_list(items: list[str]) -> str:
     if not items:
         return "<none>"
     return "\n\n".join(f"[{index}]\n{item}" for index, item in enumerate(items, start=1))
+
+
+def _optional_context_sections(context: ContextPackage) -> str:
+    """Only include caller/callee/class/constant blocks when they exist (token trim)."""
+    sections: list[str] = []
+    if context.enclosing_class:
+        sections.append(f"ENCLOSING CLASS\n{context.enclosing_class}")
+    if context.constants:
+        sections.append("MODULE CONSTANTS\n" + "\n".join(context.constants))
+    if context.callees:
+        sections.append("SAME-FILE CALLEES FROM FAILING FUNCTION\n" + _format_context_list(context.callees))
+    if context.callers:
+        sections.append("SAME-FILE CALLERS OF FAILING FUNCTION\n" + _format_context_list(context.callers))
+    return ("\n\n".join(sections) + "\n\n") if sections else ""

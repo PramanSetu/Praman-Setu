@@ -15,7 +15,7 @@ from backend.orchestrator.state import (
 from backend.tools import validator as validator_mod
 from backend.tools.diff_regression import ScanResult
 from backend.tools.sandbox.executor import SandboxResult
-from backend.tools.validator import run_validator, splice_patched_module
+from backend.tools.validator import build_test_module, run_validator, splice_patched_module
 
 ORIGINAL_FULL = "def divide(a, b):\n    return a / b\n\ndivide(1, 0)"
 ORIGINAL_FUNC = "def divide(a, b):\n    return a / b"
@@ -150,6 +150,19 @@ def test_splice_raises_when_function_not_in_module() -> None:
         splice_patched_module(ctx, PATCHED_FUNC)
 
 
+def test_build_test_module_adds_missing_pytest_import() -> None:
+    test = "def test_x():\n    with pytest.raises(KeyError):\n        lookup('bronze')\n"
+    module = build_test_module("def lookup(t):\n    return DATA[t]", test)
+    assert "import pytest" in module
+    assert module.count("import pytest") == 1
+
+
+def test_build_test_module_keeps_single_pytest_import() -> None:
+    test = "import pytest\n\ndef test_x():\n    with pytest.raises(KeyError):\n        lookup('x')\n"
+    module = build_test_module("def lookup(t):\n    return DATA[t]", test)
+    assert module.count("import pytest") == 1
+
+
 # --- gates ---
 
 
@@ -198,9 +211,10 @@ async def test_patch_target_with_module_level_call_is_rejected(monkeypatch) -> N
     assert "module-level executable calls" in report.gate_results["gate_1"].error
 
 
-async def test_explicitly_raising_original_runtime_error_is_rejected(monkeypatch) -> None:
+async def test_unconditional_reraise_of_original_error_is_rejected(monkeypatch) -> None:
     _wire(monkeypatch)
-    code = "def divide(a, b):\n    if b == 0:\n        raise ZeroDivisionError('division by zero')\n    return a / b"
+    # Bare top-level re-raise — not a fix.
+    code = "def divide(a, b):\n    raise ZeroDivisionError('division by zero')"
     report = await run_validator(
         _patch(code=code),
         _ctx(runtime_trace={"error_type": "ZeroDivisionError"}),
@@ -208,6 +222,18 @@ async def test_explicitly_raising_original_runtime_error_is_rejected(monkeypatch
     )
     assert report.overall_passed is False
     assert "original runtime error ZeroDivisionError" in report.gate_results["gate_1"].error
+
+
+async def test_guarded_same_type_raise_is_allowed(monkeypatch) -> None:
+    _wire(monkeypatch)
+    # Guarded validation raise is a legitimate fix — guard must NOT reject it.
+    code = "def divide(a, b):\n    if b == 0:\n        raise ZeroDivisionError('division by zero')\n    return a / b"
+    report = await run_validator(
+        _patch(code=code),
+        _ctx(runtime_trace={"error_type": "ZeroDivisionError"}),
+        _diag(),
+    )
+    assert report.gate_results["gate_1"].passed is True
 
 
 async def test_generated_test_must_assert_behavior(monkeypatch) -> None:

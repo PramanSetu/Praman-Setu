@@ -5,6 +5,8 @@ FINAL_ARCHITECTURE.md are built on top of this scaffold in subsequent steps.
 """
 from __future__ import annotations
 
+from time import perf_counter
+
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import settings
 from backend.input_handler import ProcessedInput, RawInput, smart_input_handler
 from backend.input_handler.detector import UnsupportedLanguageError
+from backend.llm.client import llm_client
+from backend.observability.metrics import build_run_trace
 from backend.orchestrator.graph import build_graph
 from backend.orchestrator.state import PipelineState
 
@@ -27,6 +31,11 @@ app.add_middleware(
 
 # Compiled once; the graph is stateless across requests.
 _PIPELINE = build_graph()
+
+
+@app.on_event("shutdown")
+async def _close_llm_client() -> None:
+    await llm_client.aclose()
 
 
 @app.get("/")
@@ -53,17 +62,23 @@ async def handle_input(payload: RawInput) -> ProcessedInput:
 
 
 @app.post("/api/analyze")
-async def analyze(payload: RawInput) -> dict[str, object]:
-    """Full pipeline: Input -> Context -> Diagnoser -> Patcher -> Validator (-> Reflector)*."""
+async def analyze(payload: RawInput, debug: bool = False) -> dict[str, object]:
+    """Full pipeline: Input -> Context -> Diagnoser -> Patcher -> Validator (-> Reflector)*.
+
+    Pass ``?debug=true`` to include the lightweight performance trace.
+    """
+    started = perf_counter()
     try:
         processed = await smart_input_handler.handle(payload)
     except UnsupportedLanguageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    input_handler_ms = (perf_counter() - started) * 1000
 
     state = PipelineState(raw_input=processed, language=processed.language)
     final = await _PIPELINE.ainvoke(state)
+    total_ms = (perf_counter() - started) * 1000
 
-    return {
+    response: dict[str, object] = {
         "status": processed.status,
         "diagnoser_output": final.get("diagnoser_output"),
         "patcher_output": final.get("patcher_output"),
@@ -75,3 +90,8 @@ async def analyze(payload: RawInput) -> dict[str, object]:
         "validation_history": final.get("validation_history", []),
         "patcher_prompts": final.get("patcher_prompts", []),
     }
+    if debug:
+        response["trace"] = build_run_trace(
+            final, input_handler_ms=input_handler_ms, total_ms=total_ms
+        )
+    return response

@@ -7,6 +7,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from backend.observability.metrics import LLMCallMetric
+
 
 # Single source of truth for the handler's pipeline status values.
 ProcessedStatus = Literal["ready", "execution_clean", "execution_failed", "execution_timeout"]
@@ -163,3 +165,7 @@ class PipelineState(BaseModel):
     # Accumulated across retries (LangGraph additive reducer), one entry per
     # Patcher invocation describing the hypothesis + retry constraint used.
     patcher_prompts: Annotated[list[str], operator.add] = Field(default_factory=list)
+    # --- Observability (lightweight, JSON-compatible) ---
+    node_timings: Annotated[dict[str, float], operator.or_] = Field(default_factory=dict)
+    llm_calls: Annotated[list[LLMCallMetric], operator.add] = Field(default_factory=list)
+    context_metrics: dict[str, int] = Field(default_factory=dict)

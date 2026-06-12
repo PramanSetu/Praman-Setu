@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 import pytest
 
@@ -71,7 +72,7 @@ def _diagnosis(
     *,
     theory: str = "The denominator can be zero and is used directly in division.",
     fix_direction: str = "Guard against zero before dividing.",
-    affected_scope: str = "unknown",
+    affected_scope: Literal["local", "caller", "callee", "class", "module", "unknown"] = "unknown",
     generated_test: str = (
         "import pytest\n\n"
         "def test_divide_by_zero_is_guarded():\n"

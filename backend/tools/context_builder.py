@@ -308,10 +308,11 @@ def _top_level_constants(module: ast.Module, lines: list[str]) -> list[str]:
 
 
 def _node_source(lines: list[str], node: ast.AST) -> str:
+    lineno = getattr(node, "lineno", 1)
     end_lineno = getattr(node, "end_lineno", None)
     if end_lineno is None:
-        return lines[node.lineno - 1].strip()
-    return "\n".join(lines[node.lineno - 1 : end_lineno])
+        return lines[lineno - 1].strip()
+    return "\n".join(lines[lineno - 1 : end_lineno])
 
 
 def _cap_context_items(items: list[str], *, max_items: int = 4, max_chars: int = 1200) -> list[str]:
