@@ -18,7 +18,13 @@ from backend.agents.patcher import PatcherAgent
 from backend.agents.reflector import ReflectorAgent
 from backend.llm.client import llm_client
 from backend.observability.metrics import collect_llm_calls
-from backend.orchestrator.state import ContextPackage, PipelineState, ProcessedInput
+from backend.orchestrator.state import (
+    ContextPackage,
+    PatcherOutput,
+    PipelineState,
+    ProcessedInput,
+    ReflectorDecision,
+)
 from backend.tools.context_builder import context_builder
 from backend.tools.validator import run_validator as run_five_gate_validator
 
@@ -99,7 +105,26 @@ async def run_patcher(state: PipelineState) -> dict:
 
     patcher = PatcherAgent(llm_client)
     with collect_llm_calls() as calls:
-        output = await patcher.patch(state.context_package, diagnosis)
+        try:
+            output = await patcher.patch(state.context_package, diagnosis)
+        except Exception as exc:
+            # Never crash the pipeline (e.g. unparseable input). Emit a blocked
+            # patch so the Validator rejects it and we fail safe to human review.
+            blocked = PatcherOutput(
+                unified_diff="(patch failed)",
+                confidence=0.0,
+                approach="patch generation failed",
+                patched_code="",
+                blocked_reason=str(exc)[:300],
+                hypothesis_used=state.hypothesis_used,
+            )
+            return {
+                "patcher_output": blocked,
+                "patch_history": [blocked],
+                "patcher_prompts": [f"hypothesis={state.hypothesis_used}; error={type(exc).__name__}"],
+                "llm_calls": calls,
+                "human_review_flag": True,
+            }
     output = output.model_copy(update={"hypothesis_used": state.hypothesis_used})
 
     prompt_note = f"hypothesis={state.hypothesis_used}"
@@ -128,7 +153,18 @@ async def run_validator(state: PipelineState) -> dict:
 async def run_reflector(state: PipelineState) -> dict:
     reflector = ReflectorAgent(llm_client)
     with collect_llm_calls() as calls:
-        decision = await reflector.reflect(state)
+        try:
+            decision = await reflector.reflect(state)
+        except Exception as exc:
+            # Fail safe: a Reflector error becomes give_up -> terminates to review.
+            decision = ReflectorDecision(
+                strategy="give_up",
+                failure_root_cause=f"reflector failed: {type(exc).__name__}",
+                constraint_for_next_attempt="",
+                confidence_in_strategy=0.0,
+                abandoning_hypothesis=state.hypothesis_used,
+                new_hypothesis_to_try=None,
+            )
 
     new_retry = state.retry_count + 1
     failed = list(state.failed_hypotheses)
