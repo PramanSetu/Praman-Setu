@@ -17,6 +17,7 @@ from backend.input_handler.detector import UnsupportedLanguageError
 from backend.llm.client import llm_client
 from backend.observability.metrics import build_run_trace
 from backend.orchestrator.graph import build_graph
+from backend.orchestrator.iterative import IterativeResult, iterative_fix
 from backend.orchestrator.state import PipelineState
 
 app = FastAPI(title="Praman Setu", version="0.1.0")
@@ -95,3 +96,14 @@ async def analyze(payload: RawInput, debug: bool = False) -> dict[str, object]:
             final, input_handler_ms=input_handler_ms, total_ms=total_ms
         )
     return response
+
+
+@app.post("/api/fix")
+async def fix(payload: RawInput, max_iterations: int = 5) -> IterativeResult:
+    """Iteratively fix multiple bugs: fix one, re-run, repeat until clean or stuck."""
+    try:
+        return await iterative_fix(
+            payload.code, payload.filename, max_iterations=max_iterations
+        )
+    except UnsupportedLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -166,10 +166,12 @@ def _assert_signature_preserved(
 
 
 def _extract_signature(code: str) -> str | None:
+    # Graceful on unparseable input: the original target may not parse (e.g. the
+    # bug itself is a SyntaxError). Callers fall back to the known signature.
     try:
         module = ast.parse(code)
-    except SyntaxError as exc:
-        raise PatcherError(f"Invalid Python syntax while extracting signature: {exc.msg}") from exc
+    except SyntaxError:
+        return None
 
     for node in ast.walk(module):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
