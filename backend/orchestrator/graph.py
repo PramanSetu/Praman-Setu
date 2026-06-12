@@ -227,7 +227,21 @@ def _timed(name: str, fn: Callable[[PipelineState], Awaitable[dict]]) -> Callabl
     return wrapper
 
 
-def build_graph():
+def build_graph(checkpointer=None):
+    """Compile the pipeline graph.
+
+    ``checkpointer`` is an optional LangGraph checkpoint store.  When provided
+    (e.g. an ``AsyncSqliteSaver`` from the FastAPI lifespan), every node
+    transition is persisted so the pipeline can resume after an LLM timeout or
+    be paused at ``human_review_flag=True`` nodes.  When None (the default)
+    the graph compiles without persistence — unit tests and scripts are
+    unaffected.
+
+    Usage with checkpointing::
+
+        config = {"configurable": {"thread_id": request_id}}
+        result = await graph.ainvoke(state, config=config)
+    """
     workflow = StateGraph(PipelineState)
     workflow.add_node("run_context_builder", _timed("run_context_builder", run_context_builder))
     workflow.add_node("run_diagnoser", _timed("run_diagnoser", run_diagnoser))
@@ -247,7 +261,7 @@ def build_graph():
     workflow.add_conditional_edges(
         "run_reflector", route_after_reflector, {"done": END, "run_patcher": "run_patcher"}
     )
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # Back-compat alias.

@@ -38,6 +38,13 @@ _PY_LANGUAGE = Language(tree_sitter_python.language())
 
 _ORIG_MYPY_CACHE: dict[int, list[str]] = {}
 
+# Per-patched-module bandit scan cache.
+# Key: hash(patched_module_source).  Value: ScanResult returned by scan_code.
+# Bandit results are deterministic for identical source, so this is safe to
+# cache for the lifetime of the process.  Keyed on the full patched module
+# (not just the function) to account for import-level changes.
+_PATCHED_SCAN_CACHE: dict[int, object] = {}
+
 def _parse_mypy_errors(output: str) -> list[str]:
     errors = []
     for line in output.splitlines():
@@ -59,70 +66,15 @@ def _fail_report(summary: str, gate: str, detail: str, elapsed: float) -> Valida
 # The tracer runs user code under this virtual filename, so the LLM-generated test
 # often writes `from user_code import ...`. The function is in the same test file,
 # so that import is both redundant and unresolvable — strip it.
+# Kept here for reference; the canonical set lives in test_module_constructor.
 _LOCAL_MODULES = {"user_code", "main", "solution", "snippet"}
 
-
-def _strip_top_level_calls(code: str) -> str:
-    """Drop module-level bare calls (the original crash reproduction)."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
-    tree.body = [
-        node
-        for node in tree.body
-        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call))
-    ]
-    return ast.unparse(tree)
-
-
-def _strip_local_imports(code: str) -> str:
-    """Drop imports of the function-under-test from its own (same-file) module."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
-    body = []
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module in _LOCAL_MODULES:
-            continue
-        if isinstance(node, ast.Import) and any(a.name in _LOCAL_MODULES for a in node.names):
-            continue
-        body.append(node)
-    tree.body = body
-    return ast.unparse(tree)
-
-
-def _ensure_pytest_import(code: str) -> str:
-    """Prepend `import pytest` when the test uses it but forgot to import it.
-
-    The LLM frequently writes `pytest.raises(...)` without `import pytest`, which
-    fails at runtime with NameError. Adding the import makes the test runnable.
-    """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
-    uses_pytest = any(isinstance(n, ast.Name) and n.id == "pytest" for n in ast.walk(tree))
-    has_import = any(
-        isinstance(n, ast.Import) and any(a.name == "pytest" for a in n.names)
-        for n in ast.walk(tree)
-    )
-    if uses_pytest and not has_import:
-        return "import pytest\n" + code
-    return code
-
-
-def build_test_module(patched_module: str, generated_test: str) -> str:
-    """Module the test runs against.
-
-    Drops the original's top-level crash reproduction (so importing the file for
-    pytest doesn't re-raise the bug at collection time), strips the generated
-    test's redundant self-import of the function under test, and ensures pytest is
-    imported when the test relies on it.
-    """
-    test = _ensure_pytest_import(_strip_local_imports(generated_test))
-    return _strip_top_level_calls(patched_module) + "\n\n" + test
+# ---------------------------------------------------------------------------
+# Test module construction — delegates to the AST-based constructor
+# ---------------------------------------------------------------------------
+# build_test_module is re-exported here so callers (tests, smoke scripts)
+# that import it from validator continue to work.
+from backend.tools.test_module_constructor import build_test_module  # noqa: E402
 
 
 def splice_patched_module(
@@ -217,23 +169,45 @@ async def run_validator(
     
     old_mypy_errors = _ORIG_MYPY_CACHE[code_hash]
 
-    # Gates 2-4 in parallel
+    # Gates 2-4 in parallel.
+    # Bandit (Gate 3 / Gate 5 input) is cached per patched module hash so that
+    # reflector retries re-submitting the same patch don't spin up a new sandbox.
     test_module = build_test_module(patched_module, diagnoser_output.generated_test)
     g_start = time.time()
-    mypy_task = sandbox_pool.execute(
-        language="python",
-        code=patched_module,
-        cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
-        timeout=15,
-    )
-    scan_task = scan_code(patched_module)
-    pytest_task = sandbox_pool.execute(
-        language="python",
-        code=test_module,
-        cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
-        timeout=15,
-    )
-    mypy_res, scan_res, pytest_res = await asyncio.gather(mypy_task, scan_task, pytest_task)
+
+    patched_hash = hash(patched_module)
+    if patched_hash in _PATCHED_SCAN_CACHE:
+        cached_scan = _PATCHED_SCAN_CACHE[patched_hash]
+        mypy_task = sandbox_pool.execute(
+            language="python",
+            code=patched_module,
+            cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
+            timeout=15,
+        )
+        pytest_task = sandbox_pool.execute(
+            language="python",
+            code=test_module,
+            cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
+            timeout=15,
+        )
+        mypy_res, pytest_res = await asyncio.gather(mypy_task, pytest_task)
+        scan_res = cached_scan
+    else:
+        mypy_task = sandbox_pool.execute(
+            language="python",
+            code=patched_module,
+            cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
+            timeout=15,
+        )
+        scan_task = scan_code(patched_module)
+        pytest_task = sandbox_pool.execute(
+            language="python",
+            code=test_module,
+            cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
+            timeout=15,
+        )
+        mypy_res, scan_res, pytest_res = await asyncio.gather(mypy_task, scan_task, pytest_task)
+        _PATCHED_SCAN_CACHE[patched_hash] = scan_res
 
     new_mypy_errors = _parse_mypy_errors(mypy_res.stdout or mypy_res.stderr or "")
     introduced_mypy = len(set(new_mypy_errors) - set(old_mypy_errors))
@@ -257,12 +231,14 @@ async def run_validator(
         duration_s=time.time() - g5_start,
     )
 
-    # Gate 3 — security (NEW HIGH severity blocks; capture scanner errors)
-    introduced_high = [f for f in safety_diff.introduced if f.severity == "HIGH"]
-    g3_passed = not introduced_high
+    # Gate 3 — security absolute floor: any HIGH severity finding in the patched
+    # code is rejected, regardless of whether it pre-existed in the original.
+    # Gate 5 (diff regression) handles the "newly introduced" angle separately.
+    patched_high = [f for f in scan_res.findings if f.severity == "HIGH"]
+    g3_passed = not patched_high
     g3_notes = []
-    if introduced_high:
-        g3_notes.append("NEW HIGH severity: " + ", ".join(f.rule for f in introduced_high))
+    if patched_high:
+        g3_notes.append("HIGH severity: " + ", ".join(f.rule for f in patched_high))
     g3_notes.extend(scan_res.errors)
     gate_results["gate_3"] = GateResult(
         passed=g3_passed,
