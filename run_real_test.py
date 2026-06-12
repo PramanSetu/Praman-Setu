@@ -4,72 +4,76 @@ from time import perf_counter
 from backend.llm.client import llm_client
 from backend.orchestrator.iterative import iterative_fix
 
-CODE = """from typing import List, Dict, Optional
-import json
+CODE = '''import json
 
-class DataAggregator:
-    def __init__(self, config: Dict):
-        self.config = config
-        self.results = []
-    
-    def parse_records(self, raw_json: str) -> List[Dict]:
-        if not raw_json:
-            return []
-        data = json.loads(raw_json)
-        return data.get("records", [])
-    
-    def compute_average(self, values: List[float]) -> float:
-        total = sum(values)
-        count = len(values)
-        return total / count
-    
-    def process_record(self, record: Dict) -> Optional[str]:
-        scores = record.get("scores", [])
-        avg = self.compute_average(scores)
-        max_score = max(scores)
-        
-        if avg > 80:
-            return f"Excellent: avg={avg:.1f}, max={max_score}"
-        elif avg > 50:
-            return f"Good: avg={avg:.1f}, max={max_score}"
-        return f"Poor: avg={avg:.1f}, max={max_score}"
-    
-    def run_analysis(self, raw_data: str) -> List[str]:
-        records = self.parse_records(raw_data)
-        return [self.process_record(r) for r in records]
+def load_configuration(raw_string):
+    """Parse a configuration string into a dict."""
+    return json.loads(raw_string)
 
-aggregator = DataAggregator({"mode": "standard"})
-test_data = '{"records": [{"scores": [90, 85, 88]}, {"scores": []}, {"scores": [45, 55]}]}'
-output = aggregator.run_analysis(test_data)
-for line in output:
-    print(line)
-"""
+
+config = load_configuration("{'debug': True, 'timeout': 30}")
+print(config)
+'''
 
 async def main() -> None:
     from backend.tools.sandbox.pool import sandbox_pool
+    from backend.input_handler.models import RawInput
+    from backend.input_handler.service import smart_input_handler
+    from backend.orchestrator.graph import build_graph
+    from backend.orchestrator.state import PipelineState
+
     print("Warming sandbox pool...")
     await sandbox_pool.warm()
 
-    print("Starting iterative_fix pipeline...\n")
+    print("Starting pipeline...\n")
     started = perf_counter()
 
-    result = await iterative_fix(CODE, "test_code.py", max_iterations=6)
+    processed = await smart_input_handler.handle(RawInput(code=CODE, filename="test_code.py"))
+    print(f"Input handler: status={processed.status}  error_type={processed.error_type}  line={processed.error_line}\n")
+
+    graph = build_graph()
+    state = PipelineState(raw_input=processed, language="python")
+    final = await graph.ainvoke(state)
     elapsed = (perf_counter() - started) * 1000
 
-    print(f"status={result.status}  bugs_fixed={result.bugs_fixed}  "
-          f"iterations={result.total_iterations}  ({elapsed:.0f}ms)\n")
+    # --- Diagnoser ---
+    diag = final.get("diagnoser_output")
+    if diag:
+        h1 = diag.hypotheses[0]
+        print("=== DIAGNOSER ===")
+        print(f"root_cause:      {diag.root_cause}")
+        print(f"H1 theory:       {h1.theory}")
+        print(f"H1 fix_direction:{h1.fix_direction}")
+        print(f"generated_test:\n{diag.generated_test}\n")
 
-    for step in result.steps:
-        mark = "✓ FIXED" if step.fixed else "✗ STUCK"
-        print(f"  [{step.iteration}] {mark}  {step.error_type} @ line {step.error_line}")
-        if step.detail:
-            print(f"         → {step.detail[:200]}")
+    # --- Patcher ---
+    patch = final.get("patcher_output")
+    if patch:
+        print("=== PATCHER ===")
+        print(f"approach:      {patch.approach}")
+        print(f"confidence:    {patch.confidence}")
+        print(f"blocked_reason:{patch.blocked_reason}")
+        print(f"patched_code:\n{patch.patched_code}\n")
 
-    print("\n=== FINAL CODE ===")
-    print(result.final_code)
+    # --- Validator ---
+    report = final.get("validator_report")
+    if report:
+        print("=== VALIDATOR ===")
+        print(f"overall_passed: {report.overall_passed}")
+        for gate, result in report.gate_results.items():
+            status = "PASS" if result.passed else "FAIL"
+            print(f"  {gate}: {status}", end="")
+            if not result.passed and result.error:
+                # Trim long pytest output to first 15 lines
+                err = "\n".join(result.error.splitlines()[:15])
+                print(f"\n    {err}")
+            else:
+                print()
 
+    print(f"\nTotal: {elapsed:.0f}ms   retry_count={final.get('retry_count', 0)}")
     await llm_client.aclose()
     await sandbox_pool.drain()
+
 
 
 if __name__ == "__main__":

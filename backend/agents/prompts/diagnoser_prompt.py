@@ -35,6 +35,10 @@ def render_diagnoser_prompt(
             "JSON that matches the schema exactly. Do not include markdown or explanatory text.\n"
         )
 
+    # Build a concrete calling-pattern hint so the model never confuses
+    # a class method with a standalone function.
+    test_invocation_hint = _build_test_invocation_hint(context)
+
     user_prompt = f"""FUNCTION SIGNATURE
 {context.function_signature}
 
@@ -66,9 +70,20 @@ Confidence scores must be calibrated as follows: H1 between 0.6 and 0.95, H2 bet
 The root_cause must be one sentence.
 Set affected_scope to the smallest accurate scope: local, caller, callee, class, module, or unknown.
 Use the evidence fields to cite concrete lines, runtime values, callers, callees, or imports from the provided context.
+
+HYPOTHESIS–TEST CONTRACT (read carefully — violations cause pipeline failure):
+H1's fix_direction MUST include a concrete return value or action. Do NOT write vague directions like "handle the empty case". Write exactly what the fixed code does: e.g. "return 0 when the list is empty", "raise ValueError('scores cannot be empty')", "return None if the input is empty".
+Your generated_test MUST assert the EXACT outcome described in H1's fix_direction:
+  - If fix_direction says "return 0"      → test MUST assert result == 0
+  - If fix_direction says "return None"   → test MUST assert result is None
+  - If fix_direction says "return float('nan')" → test MUST use math.isnan(result)
+  - If fix_direction says "raise ValueError" → test MUST use pytest.raises(ValueError)
+Treat H1's fix_direction as the specification. The test is the acceptance criterion for that specification. They must describe the same observable outcome. An LLM that writes a test asserting None when fix_direction says return nan has produced an internally inconsistent diagnosis — this WILL cause the Patcher to fail.
+
 The generated_test must be a NON-EMPTY string containing standalone pytest code, not inside a class.
 The generated_test must include a function whose name starts with def test_.
-The generated_test must reference the buggy function DIRECTLY by name — it is defined in the SAME file as the test, so do NOT import it (no `from user_code import ...`).
+CRITICAL — how to call the function under test:
+{test_invocation_hint}
 Do NOT write a test that merely expects the same crash shown in runtime evidence. A patch that only raises {trace.get("error_type")} again is not a real fix.
 Use pytest.raises only when the code context clearly shows that raising a specific domain/validation exception is the correct contract. Otherwise assert the corrected non-crashing behavior that is most directly implied by callers, constants, function name, or existing code.
 If the correct behavior cannot be inferred safely, set requires_clarification=true and put the exact question in clarification_question.
@@ -79,6 +94,40 @@ The generated_test must contain at least one assert or pytest.raises.
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _build_test_invocation_hint(context: ContextPackage) -> str:
+    """Return a concrete calling-pattern example for the generated test.
+
+    Detects whether the failing function is a class method or a standalone
+    function so the Diagnoser never writes a bare call like ``compute_average([])``
+    when the function is actually ``self.compute_average(values)`` on a class.
+    """
+    sig = context.function_signature or ""
+    func_name = sig.split("(")[0].replace("def ", "").replace("async def ", "").strip()
+
+    if context.enclosing_class:
+        # Extract class name from the first line of the enclosing class snippet.
+        class_line = context.enclosing_class.splitlines()[0].strip()
+        # e.g. "class DataAggregator:" or "class DataAggregator(Base):"
+        class_name = class_line.replace("class ", "").split("(")[0].split(":")[0].strip()
+        return (
+            f"The function `{func_name}` is a METHOD of class `{class_name}`. "
+            f"You MUST instantiate the class first, then call the method on the instance. "
+            f"Example pattern:\n"
+            f"  obj = {class_name}(<minimal_args>)\n"
+            f"  result = obj.{func_name}(<test_args>)\n"
+            f"  assert result == <expected_value>\n"
+            f"Do NOT call `{func_name}(...)` directly — that will raise NameError."
+        )
+    else:
+        return (
+            f"The function `{func_name}` is a STANDALONE function defined at module level. "
+            f"Call it directly by name — do NOT use `self.` prefix and do NOT import it. "
+            f"Example pattern:\n"
+            f"  result = {func_name}(<test_args>)\n"
+            f"  assert result == <expected_value>"
+        )
 
 
 def _format_crash_variables(trace: dict) -> str:

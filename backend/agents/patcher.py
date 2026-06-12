@@ -5,6 +5,7 @@ import ast
 import asyncio
 import difflib
 import logging
+import textwrap
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -145,7 +146,7 @@ def _select_patch_target(context: ContextPackage, diagnosis: DiagnoserOutput) ->
 
 def _validate_python_syntax(code: str) -> None:
     try:
-        ast.parse(code)
+        ast.parse(textwrap.dedent(code))
     except SyntaxError as exc:
         raise PatcherError(f"Invalid Python syntax in patched_code: {exc.msg}") from exc
 
@@ -169,13 +170,14 @@ def _extract_signature(code: str) -> str | None:
     # Graceful on unparseable input: the original target may not parse (e.g. the
     # bug itself is a SyntaxError). Callers fall back to the known signature.
     try:
-        module = ast.parse(code)
+        dedented = textwrap.dedent(code)
+        module = ast.parse(dedented)
     except SyntaxError:
         return None
 
     for node in ast.walk(module):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            lines = code.splitlines()
+            lines = dedented.splitlines()
             start = node.lineno - 1
             end = node.body[0].lineno - 1 if node.body else node.lineno
             return "\n".join(lines[start:end]).strip()
@@ -184,11 +186,12 @@ def _extract_signature(code: str) -> str | None:
 
 def _extract_first_function_source(code: str) -> str | None:
     try:
-        module = ast.parse(code)
+        dedented = textwrap.dedent(code)
+        module = ast.parse(dedented)
     except SyntaxError:
         return None
 
-    lines = code.splitlines()
+    lines = dedented.splitlines()
     for node in ast.walk(module):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             end_lineno = getattr(node, "end_lineno", None)
