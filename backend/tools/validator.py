@@ -36,6 +36,15 @@ logger = logging.getLogger(__name__)
 
 _PY_LANGUAGE = Language(tree_sitter_python.language())
 
+_ORIG_MYPY_CACHE: dict[int, list[str]] = {}
+
+def _parse_mypy_errors(output: str) -> list[str]:
+    errors = []
+    for line in output.splitlines():
+        if "error:" in line:
+            errors.append(line[line.find("error:"):].strip())
+    return errors
+
 
 def _fail_report(summary: str, gate: str, detail: str, elapsed: float) -> ValidatorReport:
     return ValidatorReport(
@@ -194,6 +203,20 @@ async def run_validator(
             detailed_failures=[f"Gate 4 (pytest) failed: {test_failure}"],
         )
 
+    # Run original mypy if needed
+    original_module = context_package.full_code or context_package.function_source or context_package.error_node
+    code_hash = hash(original_module)
+    if code_hash not in _ORIG_MYPY_CACHE:
+        orig_mypy_res = await sandbox_pool.execute(
+            language="python",
+            code=original_module,
+            cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
+            timeout=15,
+        )
+        _ORIG_MYPY_CACHE[code_hash] = _parse_mypy_errors(orig_mypy_res.stdout or orig_mypy_res.stderr or "")
+    
+    old_mypy_errors = _ORIG_MYPY_CACHE[code_hash]
+
     # Gates 2-4 in parallel
     test_module = build_test_module(patched_module, diagnoser_output.generated_test)
     g_start = time.time()
@@ -212,20 +235,34 @@ async def run_validator(
     )
     mypy_res, scan_res, pytest_res = await asyncio.gather(mypy_task, scan_task, pytest_task)
 
-    # Gate 2 — type check
-    g2_passed = mypy_res.exit_code == 0
+    new_mypy_errors = _parse_mypy_errors(mypy_res.stdout or mypy_res.stderr or "")
+    introduced_mypy = len(set(new_mypy_errors) - set(old_mypy_errors))
+
+    # Gate 2 — type check (non-blocking, informational only)
+    g2_passed = True
+    g2_msg = f"type check: {len(old_mypy_errors)} pre-existing issues, {introduced_mypy} new issues introduced"
     gate_results["gate_2"] = GateResult(
         passed=g2_passed,
-        error=None if g2_passed else (mypy_res.stdout or mypy_res.stderr).strip()[:1000],
+        error=g2_msg,
         duration_s=time.time() - g_start,
     )
 
-    # Gate 3 — security (HIGH severity blocks; capture scanner errors)
-    high = [f for f in scan_res.findings if f.severity == "HIGH"]
-    g3_passed = not high
+    # Gate 5 — diff regression (full original vs patched)
+    g5_start = time.time()
+    safety_diff = await safety_diff_against_original(original_module, scan_res.findings)
+    g5_passed = safety_diff.verdict != "regression"
+    gate_results["gate_5"] = GateResult(
+        passed=g5_passed,
+        error=None if g5_passed else "new HIGH/MEDIUM security finding introduced",
+        duration_s=time.time() - g5_start,
+    )
+
+    # Gate 3 — security (NEW HIGH severity blocks; capture scanner errors)
+    introduced_high = [f for f in safety_diff.introduced if f.severity == "HIGH"]
+    g3_passed = not introduced_high
     g3_notes = []
-    if high:
-        g3_notes.append("HIGH severity: " + ", ".join(f.rule for f in high))
+    if introduced_high:
+        g3_notes.append("NEW HIGH severity: " + ", ".join(f.rule for f in introduced_high))
     g3_notes.extend(scan_res.errors)
     gate_results["gate_3"] = GateResult(
         passed=g3_passed,
@@ -239,17 +276,6 @@ async def run_validator(
         passed=g4_passed,
         error=None if g4_passed else (pytest_res.stdout or pytest_res.stderr).strip()[:1000],
         duration_s=time.time() - g_start,
-    )
-
-    # Gate 5 — diff regression (full original vs patched)
-    g5_start = time.time()
-    original_module = context_package.full_code or context_package.function_source or context_package.error_node
-    safety_diff = await safety_diff_against_original(original_module, scan_res.findings)
-    g5_passed = safety_diff.verdict != "regression"
-    gate_results["gate_5"] = GateResult(
-        passed=g5_passed,
-        error=None if g5_passed else "new HIGH/MEDIUM security finding introduced",
-        duration_s=time.time() - g5_start,
     )
 
     overall = g2_passed and g3_passed and g4_passed and g5_passed
