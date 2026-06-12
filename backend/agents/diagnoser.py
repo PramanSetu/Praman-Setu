@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from backend.agents.prompts.diagnoser_prompt import render_diagnoser_prompt
 from backend.llm.client import GROQ_PRIMARY_MODEL, LLMCompleter
 from backend.orchestrator.state import ContextPackage, DiagnoserOutput, Hypothesis
+from backend.tools.test_quality import generated_test_failure
 
 
 class DiagnoserError(Exception):
@@ -69,17 +70,26 @@ class DiagnoserAgent:
                 theory=hypothesis.theory,
                 confidence=hypothesis.confidence,
                 fix_direction=hypothesis.fix_direction,
+                evidence=hypothesis.evidence,
+                risk_if_wrong=hypothesis.risk_if_wrong,
             )
             for index, hypothesis in enumerate(sorted_hypotheses, start=1)
         ]
 
-        if not output.generated_test.strip():
-            raise DiagnoserError("Diagnoser output generated_test must not be empty")
-        if "def test_" not in output.generated_test:
-            raise DiagnoserError("Diagnoser output generated_test must contain a pytest function")
+        # Self-validate the generated test with the SAME guard the Validator uses,
+        # so a malformed test triggers a re-diagnosis here instead of dead-ending
+        # the patch-only retry loop downstream.
+        test_failure = generated_test_failure(output.generated_test)
+        if test_failure:
+            raise DiagnoserError(f"Generated test rejected: {test_failure}")
 
         return DiagnoserOutput(
             root_cause=output.root_cause,
+            affected_scope=output.affected_scope,
+            evidence=output.evidence,
             hypotheses=normalized_hypotheses,
             generated_test=output.generated_test,
+            test_assertion_summary=output.test_assertion_summary,
+            requires_clarification=output.requires_clarification,
+            clarification_question=output.clarification_question,
         )

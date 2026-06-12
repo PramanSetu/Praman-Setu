@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 import pytest
 
@@ -71,6 +72,7 @@ def _diagnosis(
     *,
     theory: str = "The denominator can be zero and is used directly in division.",
     fix_direction: str = "Guard against zero before dividing.",
+    affected_scope: Literal["local", "caller", "callee", "class", "module", "unknown"] = "unknown",
     generated_test: str = (
         "import pytest\n\n"
         "def test_divide_by_zero_is_guarded():\n"
@@ -81,6 +83,7 @@ def _diagnosis(
 ) -> DiagnoserOutput:
     return DiagnoserOutput(
         root_cause="The function divides by an unchecked zero denominator.",
+        affected_scope=affected_scope,
         hypotheses=[
             Hypothesis(id="H1", theory=theory, confidence=0.9, fix_direction=fix_direction),
             Hypothesis(id="H2", theory="Caller passes invalid input.", confidence=0.4, fix_direction="Validate caller input."),
@@ -149,6 +152,102 @@ def test_signature_preservation_rejects_changed_signature() -> None:
 
     with pytest.raises(PatcherError, match="Signature changed"):
         asyncio.run(PatcherAgent(FakeLLMClient([_patch_response(patched)])).patch(_context(), _diagnosis()))
+
+
+def test_patcher_can_target_same_file_caller_when_diagnosed_scope_is_caller() -> None:
+    context = _context(
+        error_node="def parse_total(raw):\n    return int(raw)",
+        function_signature="def parse_total(raw):",
+    ).model_copy(
+        update={
+            "function_source": "def parse_total(raw):\n    return int(raw)",
+            "callers": [
+                "def load_total(payload):\n"
+                "    raw_total = payload.get('total', '0')\n"
+                "    return parse_total(raw_total)"
+            ],
+        }
+    )
+    diagnosis = _diagnosis(
+        affected_scope="caller",
+        theory="The caller passes an empty string to parse_total.",
+        fix_direction="Normalize the caller input before invoking parse_total.",
+    )
+    patched = (
+        "def load_total(payload):\n"
+        "    raw_total = payload.get('total') or '0'\n"
+        "    return parse_total(raw_total)"
+    )
+
+    result = asyncio.run(PatcherAgent(FakeLLMClient([_patch_response(patched)])).patch(context, diagnosis))
+
+    assert result.patch_target == "caller"
+    assert result.patch_target_source.startswith("def load_total")
+    assert "+    raw_total = payload.get('total') or '0'" in result.unified_diff
+
+
+def test_patcher_can_target_same_file_callee_when_diagnosed_scope_is_callee() -> None:
+    context = _context(
+        error_node="def process(raw):\n    return normalize(raw).upper()",
+        function_signature="def process(raw):",
+    ).model_copy(
+        update={
+            "function_source": "def process(raw):\n    return normalize(raw).upper()",
+            "callees": ["def normalize(value):\n    return value.strip()"],
+        }
+    )
+    diagnosis = _diagnosis(
+        affected_scope="callee",
+        theory="The callee normalize does not handle None values.",
+        fix_direction="Make normalize return an empty string for None.",
+    )
+    patched = "def normalize(value):\n    if value is None:\n        return ''\n    return value.strip()"
+
+    result = asyncio.run(PatcherAgent(FakeLLMClient([_patch_response(patched)])).patch(context, diagnosis))
+
+    assert result.patch_target == "callee"
+    assert result.patch_target_source.startswith("def normalize")
+    assert "+    if value is None:" in result.unified_diff
+
+
+def test_patcher_can_target_exact_enclosing_class_when_diagnosed_scope_is_class() -> None:
+    class_source = (
+        "class Cart:\n"
+        "    tax_rate = 0.18\n\n"
+        "    def __init__(self, items):\n"
+        "        self.items = items\n\n"
+        "    def total(self):\n"
+        "        return sum(self.items) * self.tax_rate"
+    )
+    context = _context(
+        error_node="    def total(self):\n        return sum(self.items) * self.tax_rate",
+        function_signature="def total(self):",
+    ).model_copy(
+        update={
+            "function_source": "    def total(self):\n        return sum(self.items) * self.tax_rate",
+            "enclosing_class_source": class_source,
+        }
+    )
+    diagnosis = _diagnosis(
+        affected_scope="class",
+        theory="The class stores tax_rate as a percentage multiplier but total omits the base amount.",
+        fix_direction="Fix the class total calculation while preserving the public methods.",
+    )
+    patched = (
+        "class Cart:\n"
+        "    tax_rate = 0.18\n\n"
+        "    def __init__(self, items):\n"
+        "        self.items = items\n\n"
+        "    def total(self):\n"
+        "        subtotal = sum(self.items)\n"
+        "        return subtotal + subtotal * self.tax_rate"
+    )
+
+    result = asyncio.run(PatcherAgent(FakeLLMClient([_patch_response(patched)])).patch(context, diagnosis))
+
+    assert result.patch_target == "class"
+    assert result.patch_target_source == class_source
+    assert "+        subtotal = sum(self.items)" in result.unified_diff
 
 
 def test_syntax_validation_retries_once_then_raises() -> None:

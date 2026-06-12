@@ -196,6 +196,19 @@ def test_semantically_invalid_output_retries_once() -> None:
     assert "def test_" in result.generated_test
 
 
+def test_assertionless_generated_test_retries_then_succeeds() -> None:
+    # A test with a test_ function but no assert/pytest.raises must be rejected
+    # and re-diagnosed (self-validation), not passed downstream.
+    invalid = _output(generated_test="def test_divide():\n    divide(1, 0)\n").model_dump()
+    valid = _output()
+    llm = FakeLLMClient([invalid, valid])
+
+    result = asyncio.run(DiagnoserAgent(llm).diagnose(_context()))
+
+    assert len(llm.calls) == 2
+    assert "pytest.raises" in result.generated_test
+
+
 def test_confidence_ordering_is_sorted_and_ids_are_normalized() -> None:
     result = asyncio.run(
         DiagnoserAgent(FakeLLMClient([_output(h1=0.2, h2=0.9, h3=0.5)])).diagnose(_context())

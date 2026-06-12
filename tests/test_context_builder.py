@@ -113,6 +113,40 @@ def test_runtime_trace_carries_captured_variables() -> None:
     assert package.runtime_trace["snapshots"] == snapshots
 
 
+def test_enriches_same_file_context_for_method_error() -> None:
+    code = "\n".join(
+        [
+            "DEFAULT_DOMAIN = 'example.com'",
+            "",
+            "def normalize_email(value):",
+            "    return value.strip().lower()",
+            "",
+            "def send_welcome_email(user):",
+            "    return user.email",
+            "",
+            "class UserService:",
+            "    cache_enabled = True",
+            "",
+            "    def get_email(self, user):",
+            "        return normalize_email(user.email)",
+            "",
+            "    def build_profile(self, user):",
+            "        return {'email': self.get_email(user)}",
+        ]
+    )
+
+    package = asyncio.run(ContextBuilder().build(_processed_input(code, error_line=13)))
+
+    assert "class UserService:" in (package.enclosing_class or "")
+    assert "def get_email(self, user):" in (package.enclosing_class or "")
+    assert "def build_profile(self, user):" in (package.enclosing_class_source or "")
+    assert "return {'email': self.get_email(user)}" in (package.enclosing_class_source or "")
+    assert package.constants == ["DEFAULT_DOMAIN = 'example.com'"]
+    assert any("def normalize_email(value):" in callee for callee in package.callees)
+    assert any("def build_profile(self, user):" in caller for caller in package.callers)
+    assert "13 |         return normalize_email(user.email)" in package.error_window_with_lines
+
+
 def test_extracts_multiline_function_signature() -> None:
     code = "\n".join(
         [

@@ -7,6 +7,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from backend.observability.metrics import LLMCallMetric
+
 
 # Single source of truth for the handler's pipeline status values.
 ProcessedStatus = Literal["ready", "execution_clean", "execution_failed", "execution_timeout"]
@@ -56,10 +58,17 @@ class ProcessedInput(BaseModel):
 
 class ContextPackage(BaseModel):
     error_node: str                       # ~10-line window around the error
+    error_line: int | None = None
+    error_window_with_lines: str = ""
     function_signature: str
     imports: list[str]
     runtime_trace: dict[str, Any]
     language: Literal["python"]
+    enclosing_class: str | None = None
+    enclosing_class_source: str | None = None
+    callers: list[str] = Field(default_factory=list)
+    callees: list[str] = Field(default_factory=list)
+    constants: list[str] = Field(default_factory=list)
     # Full original module + the exact source of the enclosing function. These let
     # the Validator splice the patched function back into a runnable module and
     # validate/scan the *whole file*, not a fragment. Default "" for unit fixtures.
@@ -72,18 +81,33 @@ class Hypothesis(BaseModel):
     theory: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
     fix_direction: str = Field(min_length=1)
+    evidence: list[str] = Field(default_factory=list)
+    risk_if_wrong: str = ""
 
 
 class DiagnoserOutput(BaseModel):
     root_cause: str = Field(min_length=1)
+    affected_scope: Literal["local", "caller", "callee", "class", "module", "unknown"] = "unknown"
+    evidence: list[str] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(min_length=3, max_length=3)
     generated_test: str = Field(min_length=1)
+    test_assertion_summary: str = ""
+    requires_clarification: bool = False
+    clarification_question: str | None = None
 
 
 class PatcherOutput(BaseModel):
     unified_diff: str = Field(min_length=1)      # for display only
     confidence: float = Field(ge=0.0, le=1.0)
     approach: str = Field(min_length=1)
+    patch_target: Literal["function", "caller", "callee", "class"] = "function"
+    patch_target_source: str = ""
+    hypothesis_used: str = "H1"
+    lines_changed: int = 0
+    potential_side_effects: list[str] = Field(default_factory=list)
+    api_signature_preserved: bool = True
+    new_imports_required: list[str] = Field(default_factory=list)
+    blocked_reason: str | None = None
     # The complete patched function source. The Validator validates THIS directly
     # (no lossy diff round-trip). Default "" only for unit fixtures.
     patched_code: str = ""
@@ -136,6 +160,12 @@ class PipelineState(BaseModel):
     failed_hypotheses: list[str] = Field(default_factory=list)
     human_review_flag: bool = False
     hypothesis_used: str = "H1"
+    patch_history: Annotated[list[PatcherOutput], operator.add] = Field(default_factory=list)
+    validation_history: Annotated[list[ValidatorReport], operator.add] = Field(default_factory=list)
     # Accumulated across retries (LangGraph additive reducer), one entry per
     # Patcher invocation describing the hypothesis + retry constraint used.
     patcher_prompts: Annotated[list[str], operator.add] = Field(default_factory=list)
+    # --- Observability (lightweight, JSON-compatible) ---
+    node_timings: Annotated[dict[str, float], operator.or_] = Field(default_factory=dict)
+    llm_calls: Annotated[list[LLMCallMetric], operator.add] = Field(default_factory=list)
+    context_metrics: dict[str, int] = Field(default_factory=dict)

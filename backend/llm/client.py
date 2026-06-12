@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from time import perf_counter
 from typing import Any, Protocol, TypeVar
 
 import httpx
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 
 from backend.config import settings
 from backend.llm.models import model_for
+from backend.observability.metrics import LLMCallMetric, record_llm_call
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -46,6 +48,19 @@ class LLMClient:
         self.ollama_chat_completions_url = (
             ollama_base_url or settings.ollama_base_url
         ).rstrip("/") + "/chat/completions"
+        # Persistent client → connection keep-alive across the whole pipeline
+        # (Diagnoser -> Patcher -> Reflector) instead of a TLS handshake per call.
+        self._http: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(http2=True)
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     async def complete(
         self,
@@ -62,10 +77,12 @@ class LLMClient:
         reasoning_format: str | None = None,
     ) -> SchemaT:
         """Return a parsed Pydantic object from Groq, falling back to local Ollama."""
+        endpoint = self._select_endpoint(model)
         try:
-            return await self._complete_with_endpoint(
-                self._select_endpoint(model),
+            result, usage = await self._timed_call(
+                endpoint,
                 model=model,
+                fallback_used=False,
                 messages=messages,
                 schema=schema,
                 temperature=temperature,
@@ -75,12 +92,14 @@ class LLMClient:
                 reasoning_effort=reasoning_effort,
                 reasoning_format=reasoning_format,
             )
+            return result
         except (httpx.HTTPError, TimeoutError):
             if model == fallback_model:
                 raise
-            return await self._complete_with_endpoint(
+            result, usage = await self._timed_call(
                 self.ollama_chat_completions_url,
                 model=fallback_model,
+                fallback_used=True,
                 messages=messages,
                 schema=schema,
                 temperature=temperature,
@@ -89,6 +108,41 @@ class LLMClient:
                 use_json_schema=False,
                 reasoning_effort=None,
                 reasoning_format=None,
+            )
+            return result
+
+    async def _timed_call(
+        self,
+        endpoint: str,
+        *,
+        model: str,
+        fallback_used: bool,
+        schema: type[SchemaT],
+        **kwargs: Any,
+    ) -> tuple[SchemaT, dict | None]:
+        provider = "groq" if endpoint == GROQ_CHAT_COMPLETIONS_URL else "ollama"
+        start = perf_counter()
+        success = False
+        usage: dict | None = None
+        try:
+            result, usage = await self._complete_with_endpoint(
+                endpoint, model=model, schema=schema, **kwargs
+            )
+            success = True
+            return result, usage
+        finally:
+            record_llm_call(
+                LLMCallMetric(
+                    provider=provider,
+                    model=model,
+                    latency_ms=round((perf_counter() - start) * 1000, 1),
+                    fallback_used=fallback_used,
+                    schema_name=schema.__name__,
+                    success=success,
+                    prompt_tokens=(usage or {}).get("prompt_tokens"),
+                    completion_tokens=(usage or {}).get("completion_tokens"),
+                    total_tokens=(usage or {}).get("total_tokens"),
+                )
             )
 
     def _select_endpoint(self, model: str) -> str:
@@ -109,7 +163,7 @@ class LLMClient:
         use_json_schema: bool,
         reasoning_effort: str | None,
         reasoning_format: str | None,
-    ) -> SchemaT:
+    ) -> tuple[SchemaT, dict | None]:
         headers = {"Content-Type": "application/json"}
         if endpoint == GROQ_CHAT_COMPLETIONS_URL:
             if not self.groq_api_key:
@@ -139,13 +193,16 @@ class LLMClient:
         if reasoning_format is not None:
             payload["reasoning_format"] = reasoning_format
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await asyncio.wait_for(
-                client.post(endpoint, headers=headers, json=payload),
-                timeout=timeout,
-            )
-            response.raise_for_status()
+        response = await asyncio.wait_for(
+            self._http_client().post(endpoint, headers=headers, json=payload, timeout=timeout),
+            timeout=timeout,
+        )
+        response.raise_for_status()
 
         body = response.json()
         content = body["choices"][0]["message"]["content"]
-        return schema.model_validate(json.loads(content))
+        return schema.model_validate(json.loads(content)), body.get("usage")
+
+
+# Process-wide singleton: one warm connection pool reused across all nodes.
+llm_client = LLMClient()

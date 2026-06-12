@@ -37,6 +37,23 @@ class ReflectorAgent:
             error_msg = "\n".join(state.validator_report.detailed_failures)
 
         available = [h.id for h in state.diagnoser_output.hypotheses] if state.diagnoser_output else []
+        patch_history = [
+            {
+                "hypothesis_used": patch.hypothesis_used,
+                "approach": patch.approach,
+                "lines_changed": patch.lines_changed,
+                "blocked_reason": patch.blocked_reason,
+            }
+            for patch in state.patch_history
+        ]
+        validation_history = [
+            {
+                "overall_passed": report.overall_passed,
+                "summary": report.summary,
+                "failures": report.detailed_failures,
+            }
+            for report in state.validation_history
+        ]
 
         user_prompt = f"""VALIDATION FAILED
 {error_msg}
@@ -46,6 +63,12 @@ RETRY COUNT: {state.retry_count} (first failure = 0, second = 1)
 
 AVAILABLE HYPOTHESES: {available}
 ALREADY FAILED HYPOTHESES: {state.failed_hypotheses}
+
+PATCH HISTORY:
+{json.dumps(patch_history, indent=2)}
+
+VALIDATION HISTORY:
+{json.dumps(validation_history, indent=2)}
 
 Provide your strategy following the JSON schema:
 {schema}
