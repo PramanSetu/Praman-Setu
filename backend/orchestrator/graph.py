@@ -13,7 +13,7 @@ from time import perf_counter
 
 from langgraph.graph import END, StateGraph
 
-from backend.agents.diagnoser import DiagnoserAgent
+from backend.agents.diagnoser import DiagnoserAgent, DiagnoserError
 from backend.agents.patcher import PatcherAgent
 from backend.agents.reflector import ReflectorAgent
 from backend.llm.client import llm_client
@@ -69,7 +69,12 @@ async def run_diagnoser(state: PipelineState) -> dict:
     assert state.context_package is not None, "context_package must be built before diagnosis"
     diagnoser = DiagnoserAgent(llm_client)
     with collect_llm_calls() as calls:
-        output = await diagnoser.diagnose(state.context_package)
+        try:
+            output = await diagnoser.diagnose(state.context_package)
+        except DiagnoserError:
+            # No usable diagnosis/test after retry — fail safe to human review
+            # rather than handing a bad test to the patch-only retry loop.
+            return {"llm_calls": calls, "human_review_flag": True}
     update: dict = {"diagnoser_output": output, "llm_calls": calls}
     # If the Diagnoser can't safely infer the intended behavior, don't guess a
     # patch — surface it for human review.
@@ -148,7 +153,10 @@ async def run_reflector(state: PipelineState) -> dict:
 
 
 def route_after_diagnoser(state: PipelineState) -> str:
-    if state.diagnoser_output and state.diagnoser_output.requires_clarification:
+    # No diagnosis (failed) or it asked for clarification -> stop for human review.
+    if state.diagnoser_output is None:
+        return "done"
+    if state.diagnoser_output.requires_clarification:
         return "done"
     return "run_patcher"
 

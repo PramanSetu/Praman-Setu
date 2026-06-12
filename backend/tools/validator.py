@@ -30,6 +30,7 @@ from backend.orchestrator.state import (
 )
 from backend.tools.diff_regression import safety_diff_against_original, scan_code
 from backend.tools.sandbox.pool import sandbox_pool
+from backend.tools.test_quality import generated_test_failure
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ async def run_validator(
         return _fail_report("Gate 1 failed: syntax error", "gate_1", "syntax error in patched code", g1_time)
     gate_results = {"gate_1": GateResult(passed=True, error=None, duration_s=g1_time)}
 
-    test_failure = _generated_test_guard_failure(diagnoser_output.generated_test)
+    test_failure = generated_test_failure(diagnoser_output.generated_test)
     if test_failure:
         gate_results["gate_4"] = GateResult(
             passed=False,
@@ -323,25 +324,6 @@ def _test_expects_error_type(generated_test: str, error_type: str | None) -> boo
     return False
 
 
-def _generated_test_guard_failure(generated_test: str) -> str | None:
-    if not generated_test.strip():
-        return "generated test is empty"
-    try:
-        module = ast.parse(generated_test)
-    except SyntaxError as exc:
-        return f"generated test has invalid syntax: {exc.msg}"
-
-    has_test_function = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
-        for node in ast.walk(module)
-    )
-    if not has_test_function:
-        return "generated test must define a test_ function"
-    if not _has_assertion_or_pytest_raises(module):
-        return "generated test must contain an assert or pytest.raises"
-    return None
-
-
 def _normalize_code(code: str) -> str:
     try:
         return ast.unparse(ast.parse(code)).strip()
@@ -418,14 +400,3 @@ def _raises_named_type(node: ast.Raise, error_type: str) -> bool:
         return False
     exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
     return isinstance(exc, ast.Name) and exc.id == error_type
-
-
-def _has_assertion_or_pytest_raises(module: ast.Module) -> bool:
-    for node in ast.walk(module):
-        if isinstance(node, ast.Assert):
-            return True
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr == "raises" and isinstance(node.func.value, ast.Name):
-                if node.func.value.id == "pytest":
-                    return True
-    return False
