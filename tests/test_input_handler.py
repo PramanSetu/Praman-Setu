@@ -53,9 +53,26 @@ def test_detects_python_by_shebang() -> None:
     assert detection.method == "shebang"
 
 
-def test_rejects_unlabeled_syntax_invalid_input() -> None:
+def test_accepts_unlabeled_syntax_invalid_python_like_input() -> None:
+    detection = detect_python_language("def broken(:\n    pass")
+
+    assert detection.language == "python"
+    assert detection.method.value == "heuristic"
+
+
+def test_accepts_unlabeled_code_with_python_traceback() -> None:
+    detection = detect_python_language(
+        "broken(:",
+        error_message='Traceback (most recent call last):\n  File "main.py", line 1\nSyntaxError: invalid syntax',
+    )
+
+    assert detection.language == "python"
+    assert detection.method.value == "traceback"
+
+
+def test_rejects_obvious_unlabeled_non_python() -> None:
     with pytest.raises(UnsupportedLanguageError):
-        detect_python_language("def broken(:\n    pass")
+        detect_python_language("console.log('nope')")
 
 
 def test_ast_detection_returns_false_for_syntax_errors() -> None:

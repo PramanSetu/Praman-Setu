@@ -29,6 +29,7 @@ from backend.llm.client import llm_client
 from backend.observability.metrics import build_run_trace
 from backend.orchestrator.graph import build_graph
 from backend.orchestrator.iterative import IterativeResult, iterative_fix
+from backend.orchestrator.repair_v2 import RepairV2Result, repair_v2
 from backend.orchestrator.state import PipelineState
 from backend.tools.sandbox.pool import sandbox_pool
 
@@ -196,9 +197,27 @@ async def analyze(payload: RawInput, debug: bool = False) -> dict[str, object]:
     return response
 
 
+@app.post("/api/repair-v2")
+async def repair_v2_endpoint(payload: RawInput, max_passes: int = 3) -> RepairV2Result:
+    """Primary pasted-file repair path: bug ledger -> exact edits -> full-file validation."""
+    try:
+        return await repair_v2(payload.code, payload.filename, max_passes=max_passes)
+    except UnsupportedLanguageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/fix")
-async def fix(payload: RawInput, max_iterations: int = 5, stream: bool = False) -> object:
-    """Iteratively fix multiple bugs.
+async def fix(
+    payload: RawInput,
+    max_iterations: int = 5,
+    stream: bool = False,
+    strategy: str = "repair_v2",
+) -> object:
+    """Fix pasted Python code.
+
+    Default ``strategy=repair_v2`` uses the whole-file BugLedger + exact-edit
+    repair path. Use ``strategy=iterative`` or ``stream=true`` for the legacy
+    single-bug iterative graph.
 
     ``stream=false`` (default): returns the full ``IterativeResult`` JSON when done.
     ``stream=true``: returns a Server-Sent Events stream.  Each SSE event is one
@@ -209,6 +228,12 @@ async def fix(payload: RawInput, max_iterations: int = 5, stream: bool = False) 
         data: {"type": "done",  "result": {...}}\\n\\n   # final summary
     """
     try:
+        if strategy == "repair_v2" and not stream:
+            return await repair_v2(
+                payload.code,
+                payload.filename,
+                max_passes=max(1, min(max_iterations, 5)),
+            )
         if stream:
             return StreamingResponse(
                 _fix_sse_stream(payload, max_iterations),
