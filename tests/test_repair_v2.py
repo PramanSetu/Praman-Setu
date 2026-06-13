@@ -4,7 +4,12 @@ from backend.agents.multi_issue_fixer import MultiIssueFixResponse
 from backend.input_handler.models import RawInput
 from backend.orchestrator.repair_v2 import repair_v2
 from backend.orchestrator.state import DetectionMethod, LanguageDetection, ProcessedInput
-from backend.tools.patch_applier import CodeEdit, apply_exact_edits
+from backend.tools.patch_applier import (
+    CodeEdit,
+    UnitRewrite,
+    apply_exact_edits,
+    apply_unit_rewrites,
+)
 from backend.tools.sandbox.executor import SandboxResult
 
 
@@ -47,7 +52,7 @@ class Fixer:
         return MultiIssueFixResponse(
             summary="fixed undefined name",
             issues_found=[issue.message for issue in ledger.issues],
-            edits=[CodeEdit(old="return missing", new="return 1", reason="missing was undefined")],
+            units=[UnitRewrite(target="f", new_source="def f():\n    return 1", reason="missing was undefined")],
             generated_tests="",
             confidence=0.9,
         )
@@ -66,6 +71,69 @@ def test_exact_edit_applier_rejects_ambiguous_blocks() -> None:
 
     assert result.applied_count == 0
     assert "matched 2 locations" in result.failures[0]
+
+
+# --- apply_unit_rewrites (AST splice) ---
+
+_MOD = (
+    "def a():\n    return undefined\n\n"
+    "def b():\n    return 2\n\n"
+    'if __name__ == "__main__":\n    print(a())\n    eval(input())\n'
+)
+
+
+def test_unit_rewrite_replaces_named_function_by_ast() -> None:
+    result = apply_unit_rewrites(_MOD, [UnitRewrite(target="a", new_source="def a():\n    return 1")])
+
+    assert result.applied_count == 1
+    assert result.failures == []
+    assert "return 1" in result.applied_code
+    assert result.applied_code.count("def a(") == 1
+    assert "def b():\n    return 2" in result.applied_code  # untouched
+
+
+def test_unit_rewrite_replaces_trailing_module_block() -> None:
+    result = apply_unit_rewrites(
+        _MOD, [UnitRewrite(target="<module>", new_source='if __name__ == "__main__":\n    print(a())')]
+    )
+
+    assert result.applied_count == 1
+    assert "eval(" not in result.applied_code
+    assert "def a():" in result.applied_code  # functions preserved
+
+
+def test_unit_rewrite_skips_unit_that_breaks_compilation() -> None:
+    # Bad indentation in the new source must be dropped, leaving the file intact.
+    result = apply_unit_rewrites(_MOD, [UnitRewrite(target="a", new_source="def a():\nreturn 1")])
+
+    assert result.applied_count == 0
+    assert "does not compile" in result.failures[0]
+    assert result.applied_code == _MOD
+
+
+def test_unit_rewrite_reports_unknown_target() -> None:
+    result = apply_unit_rewrites(_MOD, [UnitRewrite(target="nope", new_source="def nope():\n    pass")])
+
+    assert result.applied_count == 0
+    assert "not a top-level function/class" in result.failures[0]
+
+
+def test_unit_rewrite_whole_file_fixes_syntax_error() -> None:
+    # The current code does not parse, so only a <file> unit can repair it.
+    broken = "def f(x)\n    return x\n"
+    result = apply_unit_rewrites(broken, [UnitRewrite(target="<file>", new_source="def f(x):\n    return x\n")])
+
+    assert result.applied_count == 1
+    assert result.failures == []
+    assert "def f(x):" in result.applied_code
+
+
+def test_unit_rewrite_requires_file_target_when_code_unparseable() -> None:
+    broken = "def f(x)\n    return x\n"
+    result = apply_unit_rewrites(broken, [UnitRewrite(target="f", new_source="def f(x):\n    return x")])
+
+    assert result.applied_count == 0
+    assert "SyntaxError" in result.failures[0]
 
 
 async def test_repair_v2_applies_exact_edits_and_validates_clean() -> None:

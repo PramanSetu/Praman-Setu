@@ -19,7 +19,7 @@ from backend.input_handler.service import smart_input_handler
 from backend.llm.client import llm_client
 from backend.tools.bug_ledger import BugLedger, build_bug_ledger
 from backend.tools.diff_regression import scan_code
-from backend.tools.patch_applier import ApplyResult, apply_exact_edits
+from backend.tools.patch_applier import ApplyResult, apply_unit_rewrites
 from backend.tools.sandbox.executor import SandboxResult
 from backend.tools.sandbox.pool import sandbox_pool
 
@@ -110,12 +110,49 @@ async def repair_v2(
                 return _result("clean", pass_number - 1, code, current, latest_ledger, attempts)
             feedback = "Security scan failed: " + "; ".join(security)
 
-        response = await agent.fix(current, latest_ledger, validation_feedback=feedback)
-        apply_result = apply_exact_edits(current, response.edits)
+        # The file won't parse — unit-level splicing is impossible, so steer the
+        # agent straight to a single <file> rewrite instead of wasting a pass.
+        if not latest_ledger.code_compiles and not feedback:
+            feedback = (
+                "The file has a SyntaxError and cannot be parsed for unit edits. "
+                "Return a single '<file>' unit containing the entire corrected file."
+            )
+
+        try:
+            response = await agent.fix(current, latest_ledger, validation_feedback=feedback)
+        except Exception as exc:  # noqa: BLE001
+            # Both Groq and the Ollama fallback are unreachable/exhausted. Don't
+            # 500 the request — return what we have so far with a clear reason.
+            return _result(
+                "unresolved",
+                pass_number - 1,
+                code,
+                current,
+                latest_ledger,
+                attempts,
+                remaining=f"repair agent unavailable: {exc}",
+            )
+        apply_result = apply_unit_rewrites(current, response.units)
         validation_errors: list[str] = list(apply_result.failures)
 
         if apply_result.applied_code.strip() == current.strip():
-            attempts.append(_attempt(pass_number, response, apply_result, ["no code change produced"]))
+            attempts.append(
+                _attempt(pass_number, response, apply_result, validation_errors or ["no code change produced"])
+            )
+            # The agent DID propose edits but none matched the current source
+            # (the brittle-`old` case). Don't give up — tell it exactly which
+            # blocks failed and that `old` must be copied verbatim from the
+            # CURRENT code, then let it retry on the next pass.
+            if response.units and apply_result.failures and pass_number < max_passes:
+                feedback = (
+                    "Your previous units were REJECTED. A `target` must be a "
+                    "top-level function/class name, `<module>`, or `<file>`, and the "
+                    "`new_source` must be the COMPLETE corrected unit with valid "
+                    "indentation. If the file has a SyntaxError, return one `<file>` "
+                    "unit with the entire corrected file.\n"
+                    + "\n".join(apply_result.failures)
+                )
+                continue
             return _result(
                 "no_progress",
                 pass_number,

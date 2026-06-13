@@ -28,7 +28,7 @@ from backend.orchestrator.state import (
     PatcherOutput,
     ValidatorReport,
 )
-from backend.tools.diff_regression import safety_diff_against_original, scan_code
+from backend.tools.diff_regression import ScanResult, safety_diff_against_original, scan_code
 from backend.tools.sandbox.pool import sandbox_pool
 from backend.tools.test_quality import generated_test_failure
 
@@ -43,7 +43,7 @@ _ORIG_MYPY_CACHE: dict[int, list[str]] = {}
 # Bandit results are deterministic for identical source, so this is safe to
 # cache for the lifetime of the process.  Keyed on the full patched module
 # (not just the function) to account for import-level changes.
-_PATCHED_SCAN_CACHE: dict[int, object] = {}
+_PATCHED_SCAN_CACHE: dict[int, ScanResult] = {}
 
 def _parse_mypy_errors(output: str) -> list[str]:
     errors = []
@@ -199,14 +199,17 @@ async def run_validator(
             cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
             timeout=15,
         )
-        scan_task = scan_code(patched_module)
+        # Run the scan as its own task (different return type) so gather doesn't
+        # widen everything to ``object``; still concurrent with mypy + pytest.
+        scan_future = asyncio.ensure_future(scan_code(patched_module))
         pytest_task = sandbox_pool.execute(
             language="python",
             code=test_module,
             cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
             timeout=15,
         )
-        mypy_res, scan_res, pytest_res = await asyncio.gather(mypy_task, scan_task, pytest_task)
+        mypy_res, pytest_res = await asyncio.gather(mypy_task, pytest_task)
+        scan_res = await scan_future
         _PATCHED_SCAN_CACHE[patched_hash] = scan_res
 
     new_mypy_errors = _parse_mypy_errors(mypy_res.stdout or mypy_res.stderr or "")

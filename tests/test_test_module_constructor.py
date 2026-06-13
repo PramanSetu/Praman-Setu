@@ -14,11 +14,9 @@ Covers every KEEP/STRIP case from the spec:
 """
 from __future__ import annotations
 
-import pytest
 
 from backend.tools.test_module_constructor import (
     _is_safe_literal,
-    _is_safe_module_node,
     build_test_module,
     reconstruct_safe_module,
 )

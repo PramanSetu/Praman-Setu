@@ -8,29 +8,45 @@ from pydantic import BaseModel, Field
 from backend.llm.client import LLMCompleter
 from backend.llm.models import model_for
 from backend.tools.bug_ledger import BugLedger
-from backend.tools.patch_applier import CodeEdit
+from backend.tools.patch_applier import UnitRewrite
 
 
 class MultiIssueFixResponse(BaseModel):
     summary: str = Field(min_length=1)
     issues_found: list[str] = Field(default_factory=list)
-    edits: list[CodeEdit] = Field(default_factory=list)
+    units: list[UnitRewrite] = Field(default_factory=list)
     generated_tests: str = ""
     confidence: float = Field(ge=0.0, le=1.0)
 
 
 _SYSTEM_PROMPT = """\
 You are Praman Setu RepairAgent for a single pasted Python file.
-You fix practical Python bugs with exact minimal edits.
+You fix practical Python bugs by rewriting whole code units, not text fragments.
+
+How to return fixes — a list of "units", each with a `target` and the COMPLETE
+corrected `new_source` for that unit:
+  * target = a top-level function or class name  -> new_source is the whole
+    corrected function/class (full body, correct indentation).
+  * target = "<module>"  -> new_source is the whole corrected block of top-level
+    executable code (e.g. the `if __name__ == "__main__":` section).
+  * target = "<file>"  -> new_source is the ENTIRE corrected file. You MUST use a
+    single "<file>" unit when the original code has a SyntaxError (it cannot be
+    parsed for unit-level edits). You may also use it for sweeping changes.
 
 Rules:
-1. Return exact old/new code-block edits, not a full rewritten file.
-2. Each old block must be copied exactly from the input code and should identify one location.
-3. Fix all visible practical bugs supported by the bug ledger: syntax errors, undefined names,
-   wrong variable names, bad method names, IndexError, KeyError, TypeError, ZeroDivisionError,
-   top-level script crashes, and simple clear logic errors.
-4. Do not refactor, rename public APIs gratuitously, remove functionality, or invent unrelated behavior.
-5. If intent is ambiguous, make the smallest safe change that lets the script run, and mention the risk.
+1. new_source must be complete and self-consistent: a function unit is the full
+   `def ...:` through its last line; never a partial snippet. Indentation must be
+   valid Python.
+2. To fix a method, rewrite its whole enclosing class as one unit.
+3. Fix all visible practical bugs supported by the bug ledger: syntax errors,
+   undefined names, wrong variable names, bad method names, IndexError, KeyError,
+   TypeError, ZeroDivisionError, top-level script crashes, insecure calls
+   (eval/exec), and simple clear logic errors.
+4. Do not refactor, rename public APIs gratuitously, remove functionality, or
+   invent unrelated behavior. Keep every unit you touch as close to the original
+   as the fix allows.
+5. If intent is ambiguous, make the smallest safe change that lets the script run,
+   and mention the risk in `reason`.
 6. generated_tests may be empty, but include pytest tests when a behavior is inferable.
 7. Return only JSON matching the schema. No markdown.
 """
@@ -64,10 +80,10 @@ CODE WITH LINE NUMBERS
 RESPONSE JSON SCHEMA
 {schema}
 
-Return only a JSON object. Each edit.old must be an exact contiguous substring
-from the original unnumbered code. Prefer several small edits over one large
-rewrite. If the file has a SyntaxError, first make it compile, but also fix other
-clear ledger-backed bugs when the exact edit is obvious.
+Return only a JSON object. Prefer per-function / "<module>" units so each fix is
+small and independently verifiable. Use a single "<file>" unit ONLY when the code
+has a SyntaxError (so it can't be parsed for unit edits) or for a sweeping change.
+Each new_source must be the COMPLETE corrected unit with valid indentation.
 """
         response = await self.llm.complete(
             _MODEL,
