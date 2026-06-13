@@ -27,7 +27,6 @@ Public surface
 from __future__ import annotations
 
 import ast
-from typing import Sequence
 
 # ---------------------------------------------------------------------------
 # Public API

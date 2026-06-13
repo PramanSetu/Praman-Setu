@@ -84,6 +84,10 @@ The generated_test must be a NON-EMPTY string containing standalone pytest code,
 The generated_test must include a function whose name starts with def test_.
 CRITICAL — how to call the function under test:
 {test_invocation_hint}
+
+VERBATIM FAILING INPUT (critical — prevents a fake pass):
+The generated_test MUST reproduce the bug using the EXACT input that caused the crash, copied character-for-character from the code and runtime evidence above. Do NOT sanitize, correct, simplify, escape, or "improve" the failing input. Example: if the crash is json.loads("{{'debug': True, 'timeout': 30}}"), the test MUST pass that exact string "{{'debug': True, 'timeout': 30}}" — NOT a cleaned-up '{{"debug": true, "timeout": 30}}'. If you alter the input, the test no longer proves the real bug: the Patcher will satisfy your altered test while the real bug still crashes. Copy the precise failing value from observed_variables_at_crash and the error location.
+
 Do NOT write a test that merely expects the same crash shown in runtime evidence. A patch that only raises {trace.get("error_type")} again is not a real fix.
 Use pytest.raises only when the code context clearly shows that raising a specific domain/validation exception is the correct contract. Otherwise assert the corrected non-crashing behavior that is most directly implied by callers, constants, function name, or existing code.
 If the correct behavior cannot be inferred safely, set requires_clarification=true and put the exact question in clarification_question.

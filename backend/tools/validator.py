@@ -28,7 +28,7 @@ from backend.orchestrator.state import (
     PatcherOutput,
     ValidatorReport,
 )
-from backend.tools.diff_regression import safety_diff_against_original, scan_code
+from backend.tools.diff_regression import ScanResult, safety_diff_against_original, scan_code
 from backend.tools.sandbox.pool import sandbox_pool
 from backend.tools.test_quality import generated_test_failure
 
@@ -43,7 +43,7 @@ _ORIG_MYPY_CACHE: dict[int, list[str]] = {}
 # Bandit results are deterministic for identical source, so this is safe to
 # cache for the lifetime of the process.  Keyed on the full patched module
 # (not just the function) to account for import-level changes.
-_PATCHED_SCAN_CACHE: dict[int, object] = {}
+_PATCHED_SCAN_CACHE: dict[int, ScanResult] = {}
 
 def _parse_mypy_errors(output: str) -> list[str]:
     errors = []
@@ -173,40 +173,40 @@ async def run_validator(
     # Bandit (Gate 3 / Gate 5 input) is cached per patched module hash so that
     # reflector retries re-submitting the same patch don't spin up a new sandbox.
     test_module = build_test_module(patched_module, diagnoser_output.generated_test)
+    # Reproduction module: the SAME test against the ORIGINAL (unpatched) code.
+    # A faithful test must FAIL here (the bug is present); if it passes, the test
+    # doesn't reproduce the bug and a "pass" on the patch would be a false pass.
+    repro_module = build_test_module(original_module, diagnoser_output.generated_test)
     g_start = time.time()
+
+    repro_task = sandbox_pool.execute(
+        language="python",
+        code=repro_module,
+        cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=line"],
+        timeout=15,
+    )
+    mypy_task = sandbox_pool.execute(
+        language="python",
+        code=patched_module,
+        cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
+        timeout=15,
+    )
+    pytest_task = sandbox_pool.execute(
+        language="python",
+        code=test_module,
+        cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
+        timeout=15,
+    )
 
     patched_hash = hash(patched_module)
     if patched_hash in _PATCHED_SCAN_CACHE:
-        cached_scan = _PATCHED_SCAN_CACHE[patched_hash]
-        mypy_task = sandbox_pool.execute(
-            language="python",
-            code=patched_module,
-            cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
-            timeout=15,
-        )
-        pytest_task = sandbox_pool.execute(
-            language="python",
-            code=test_module,
-            cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
-            timeout=15,
-        )
-        mypy_res, pytest_res = await asyncio.gather(mypy_task, pytest_task)
-        scan_res = cached_scan
+        mypy_res, pytest_res, repro_res = await asyncio.gather(mypy_task, pytest_task, repro_task)
+        scan_res = _PATCHED_SCAN_CACHE[patched_hash]
     else:
-        mypy_task = sandbox_pool.execute(
-            language="python",
-            code=patched_module,
-            cmd=["mypy", "--ignore-missing-imports", "--no-incremental", "--no-error-summary", "main.py"],
-            timeout=15,
-        )
         scan_task = scan_code(patched_module)
-        pytest_task = sandbox_pool.execute(
-            language="python",
-            code=test_module,
-            cmd=["pytest", "main.py", "-q", "-p", "no:cacheprovider", "--tb=short"],
-            timeout=15,
+        mypy_res, scan_res, pytest_res, repro_res = await asyncio.gather(
+            mypy_task, scan_task, pytest_task, repro_task
         )
-        mypy_res, scan_res, pytest_res = await asyncio.gather(mypy_task, scan_task, pytest_task)
         _PATCHED_SCAN_CACHE[patched_hash] = scan_res
 
     new_mypy_errors = _parse_mypy_errors(mypy_res.stdout or mypy_res.stderr or "")
@@ -254,8 +254,25 @@ async def run_validator(
         duration_s=time.time() - g_start,
     )
 
-    overall = g2_passed and g3_passed and g4_passed and g5_passed
+    # Reproduction gate — the test MUST fail on the ORIGINAL code, proving it
+    # actually catches the bug. If it passes on the original, the patch passing it
+    # would be a FALSE PASS (the test was sanitized / doesn't reproduce the bug).
+    g_repro = repro_res.exit_code != 0
+    gate_results["reproduction"] = GateResult(
+        passed=g_repro,
+        error=None if g_repro else (
+            "generated test PASSES on the original code — it does not reproduce the "
+            "bug, so a patch passing it proves nothing (possible false pass)"
+        ),
+        duration_s=time.time() - g_start,
+    )
+
+    overall = g2_passed and g3_passed and g4_passed and g5_passed and g_repro
     detailed_failures = []
+    if not g_repro:
+        detailed_failures.append(
+            "Reproduction gate failed: generated test does not fail on the original code"
+        )
     if not g2_passed:
         detailed_failures.append(f"Gate 2 (mypy) failed: {gate_results['gate_2'].error}")
     if not g3_passed:

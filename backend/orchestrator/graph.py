@@ -8,6 +8,8 @@ from any partial state (and keeps unit tests offline).
 """
 from __future__ import annotations
 
+import ast
+import difflib
 from collections.abc import Awaitable, Callable
 from time import perf_counter
 
@@ -16,14 +18,17 @@ from langgraph.graph import END, StateGraph
 from backend.agents.diagnoser import DiagnoserAgent, DiagnoserError
 from backend.agents.patcher import PatcherAgent
 from backend.agents.reflector import ReflectorAgent
+from backend.agents.syntax_fixer import SyntaxFixerAgent
 from backend.llm.client import llm_client
 from backend.observability.metrics import collect_llm_calls
 from backend.orchestrator.state import (
     ContextPackage,
+    GateResult,
     PatcherOutput,
     PipelineState,
     ProcessedInput,
     ReflectorDecision,
+    ValidatorReport,
 )
 from backend.tools.context_builder import context_builder
 from backend.tools.validator import run_validator as run_five_gate_validator
@@ -36,6 +41,7 @@ _ESCALATION = {"escalate_h2": "H2", "escalate_h3": "H3"}
 # Node name -> the timing key recorded into PipelineState.node_timings.
 _NODE_METRIC = {
     "run_context_builder": "context_builder_ms",
+    "run_syntax_fix": "syntax_fix_ms",
     "run_diagnoser": "diagnoser_ms",
     "run_patcher": "patcher_ms",
     "run_validator": "validator_ms",
@@ -188,6 +194,135 @@ async def run_reflector(state: PipelineState) -> dict:
     }
 
 
+def _validate_syntax_fix(original: str, fixed: str) -> ValidatorReport:
+    """Parse-only validation (Gate 1) for a syntax fix: if it parses, it's fixed."""
+    if not fixed.strip() or fixed.strip() == original.strip():
+        return ValidatorReport(
+            overall_passed=False,
+            gate_results={"gate_1": GateResult(passed=False, error="syntax fix made no change", duration_s=0.0)},
+            safety_diff=None,
+            summary="Syntax fix failed",
+            detailed_failures=["syntax fix produced no usable change"],
+        )
+    try:
+        ast.parse(fixed)
+    except SyntaxError as exc:
+        return ValidatorReport(
+            overall_passed=False,
+            gate_results={"gate_1": GateResult(passed=False, error=f"still a syntax error: {exc.msg}", duration_s=0.0)},
+            safety_diff=None,
+            summary="Syntax fix failed",
+            detailed_failures=[f"Gate 1 (syntax) still failing: {exc.msg}"],
+        )
+    return ValidatorReport(
+        overall_passed=True,
+        gate_results={"gate_1": GateResult(passed=True, error=None, duration_s=0.0)},
+        safety_diff=None,
+        summary="Syntax fixed",
+        detailed_failures=[],
+    )
+
+
+def _minimal_syntax_fix(original: str, fixed: str, error_line: int | None, window: int = 3) -> str | None:
+    """Keep only the change near the error line; revert edits elsewhere.
+
+    The syntax fixer (an LLM) tends to "helpfully" fix unrelated logic bugs too,
+    which would then ship UNPROVEN (the syntax path is parse-only, no behavioral
+    test). This reverts any change outside the error window so the syntax error is
+    fixed minimally and the real bugs flow to the normal, test-proven pipeline.
+
+    Returns the surgical fix if it parses, else None (caller falls back to the full
+    fix so the file is still unblocked).
+    """
+    if error_line is None:
+        return None
+    o = original.splitlines()
+    f = fixed.splitlines()
+    lo, hi = error_line - 1 - window, error_line - 1 + window
+
+    merged: list[str] = []
+    changed_in_window = False
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, o, f).get_opcodes():
+        if tag == "equal":
+            merged.extend(o[i1:i2])
+        elif i1 <= hi and i2 > lo:        # change overlaps the error window → keep
+            merged.extend(f[j1:j2])
+            changed_in_window = True
+        else:                              # change outside the window → revert it
+            merged.extend(o[i1:i2])
+
+    candidate = "\n".join(merged)
+    if not changed_in_window or candidate.strip() == original.strip():
+        return None
+    try:
+        ast.parse(candidate)
+    except SyntaxError:
+        return None
+    return candidate
+
+
+async def run_syntax_fix(state: PipelineState) -> dict:
+    """SyntaxError fast path: fix the parse error, validate with parse-only."""
+    assert state.context_package is not None
+    ctx = state.context_package
+    original = ctx.full_code or ctx.error_node
+    trace = ctx.runtime_trace
+    error_line = trace.get("error_line")
+
+    fixer = SyntaxFixerAgent(llm_client)
+    with collect_llm_calls() as calls:
+        try:
+            fixed = await fixer.fix(original, str(trace.get("error_message", "")), error_line)
+        except Exception as exc:
+            blocked = PatcherOutput(
+                unified_diff="(syntax fix failed)",
+                confidence=0.0,
+                approach="syntax fix failed",
+                patched_code="",
+                blocked_reason=str(exc)[:300],
+                patch_target="module",
+            )
+            return {
+                "patcher_output": blocked,
+                "patch_history": [blocked],
+                "llm_calls": calls,
+                "human_review_flag": True,
+            }
+
+    # Prefer the surgical syntax-only fix; fall back to the LLM's full rewrite only
+    # if the minimal one can't be produced/parsed (so the file is still unblocked).
+    minimal = _minimal_syntax_fix(original, fixed, error_line)
+    chosen = minimal if minimal is not None else fixed
+
+    report = _validate_syntax_fix(original, chosen)
+    diff = "\n".join(
+        difflib.unified_diff(original.splitlines(), chosen.splitlines(), "original.py", "fixed.py", lineterm="")
+    )
+    patch = PatcherOutput(
+        unified_diff=diff or "(no diff)",
+        confidence=0.7,
+        approach="fix syntax error",
+        patched_code=chosen,
+        patch_target="module",
+        patch_target_source=original,
+    )
+    return {
+        "patcher_output": patch,
+        "patch_history": [patch],
+        "validator_report": report,
+        "validation_history": [report],
+        "llm_calls": calls,
+    }
+
+
+def route_after_context_builder(state: PipelineState) -> str:
+    # SyntaxErrors can't go through the behavioral-test pipeline — route to the
+    # dedicated parse-only fast path instead.
+    if state.raw_input.error_type == "SyntaxError":
+        return "run_syntax_fix"
+    return "run_diagnoser"
+
+
 def route_after_diagnoser(state: PipelineState) -> str:
     # No diagnosis (failed) or it asked for clarification -> stop for human review.
     if state.diagnoser_output is None:
@@ -244,13 +379,19 @@ def build_graph(checkpointer=None):
     """
     workflow = StateGraph(PipelineState)
     workflow.add_node("run_context_builder", _timed("run_context_builder", run_context_builder))
+    workflow.add_node("run_syntax_fix", _timed("run_syntax_fix", run_syntax_fix))
     workflow.add_node("run_diagnoser", _timed("run_diagnoser", run_diagnoser))
     workflow.add_node("run_patcher", _timed("run_patcher", run_patcher))
     workflow.add_node("run_validator", _timed("run_validator", run_validator))
     workflow.add_node("run_reflector", _timed("run_reflector", run_reflector))
 
     workflow.set_entry_point("run_context_builder")
-    workflow.add_edge("run_context_builder", "run_diagnoser")
+    workflow.add_conditional_edges(
+        "run_context_builder",
+        route_after_context_builder,
+        {"run_syntax_fix": "run_syntax_fix", "run_diagnoser": "run_diagnoser"},
+    )
+    workflow.add_edge("run_syntax_fix", END)
     workflow.add_conditional_edges(
         "run_diagnoser", route_after_diagnoser, {"run_patcher": "run_patcher", "done": END}
     )

@@ -10,8 +10,10 @@ import httpx
 from pydantic import BaseModel
 
 from backend.config import settings
-from backend.llm.models import model_for
+from backend.llm.models import model_for, ollama_equivalent
 from backend.observability.metrics import LLMCallMetric, record_llm_call
+
+_OLLAMA_TIMEOUT = 180.0  # local inference is far slower than Groq
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -31,6 +33,22 @@ GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Back-compat aliases sourced from the registry (single source of truth).
 GROQ_PRIMARY_MODEL = model_for("diagnoser").primary
 OLLAMA_FALLBACK_MODEL = model_for("diagnoser").fallback
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Transient errors worth retrying: network failures, timeouts, 429/5xx.
+
+    Auth/client errors (400/401/403/404) are NOT retried — a retry won't help.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS
+    if isinstance(exc, httpx.HTTPError):
+        # Transport-level: ConnectError, ConnectTimeout, ReadTimeout, ReadError,
+        # RemoteProtocolError, PoolTimeout, … — all worth a retry.
+        return True
+    return isinstance(exc, (TimeoutError, asyncio.TimeoutError))
 
 
 class LLMClient:
@@ -54,7 +72,11 @@ class LLMClient:
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(http2=True)
+            # HTTP/1.1 with keep-alive — reuses connections across calls without the
+            # multiplexing/connection-reuse quirks that can cause ConnectErrors.
+            self._http = httpx.AsyncClient(
+                limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0),
+            )
         return self._http
 
     async def aclose(self) -> None:
@@ -76,10 +98,34 @@ class LLMClient:
         reasoning_effort: str | None = None,
         reasoning_format: str | None = None,
     ) -> SchemaT:
-        """Return a parsed Pydantic object from Groq, falling back to local Ollama."""
+        """Return a parsed Pydantic object from Groq, falling back to local Ollama.
+
+        The primary call is retried with exponential backoff on transient errors
+        (connection failures, timeouts, 429/5xx) so a brief Groq blip doesn't
+        dead-end the request. Auth/4xx errors fail fast (retrying won't help).
+
+        When DEFAULT_LLM_PROVIDER=ollama, everything runs locally: the Groq model
+        id is translated to its Ollama equivalent and Groq is never contacted.
+        """
+        if self.default_provider == "ollama":
+            result, _usage = await self._call_with_retries(
+                self.ollama_chat_completions_url,
+                model=ollama_equivalent(model),
+                fallback_used=False,
+                messages=messages,
+                schema=schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=max(timeout, _OLLAMA_TIMEOUT),
+                use_json_schema=False,
+                reasoning_effort=None,
+                reasoning_format=None,
+            )
+            return result
+
         endpoint = self._select_endpoint(model)
         try:
-            result, usage = await self._timed_call(
+            result, usage = await self._call_with_retries(
                 endpoint,
                 model=model,
                 fallback_used=False,
@@ -110,6 +156,28 @@ class LLMClient:
                 reasoning_format=None,
             )
             return result
+
+    async def _call_with_retries(
+        self,
+        endpoint: str,
+        *,
+        schema: type[SchemaT],
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        **kwargs: Any,
+    ) -> tuple[SchemaT, dict | None]:
+        attempt = 0
+        while True:
+            try:
+                return await self._timed_call(endpoint, schema=schema, **kwargs)
+            except Exception as exc:
+                if attempt >= max_retries or not _is_retryable(exc):
+                    raise
+                # Drop the (possibly degraded) connection pool so the retry opens a
+                # fresh connection — the common cause of repeated ConnectErrors.
+                await self.aclose()
+                await asyncio.sleep(base_delay * (2**attempt))  # 1s, 2s, 4s
+                attempt += 1
 
     async def _timed_call(
         self,

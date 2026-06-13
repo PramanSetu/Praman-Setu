@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from dataclasses import dataclass
 
 import docker
 
@@ -37,8 +38,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Language → image/filename/command mapping
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

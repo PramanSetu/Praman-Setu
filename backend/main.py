@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +28,8 @@ from backend.input_handler.detector import UnsupportedLanguageError
 from backend.llm.client import llm_client
 from backend.observability.metrics import build_run_trace
 from backend.orchestrator.graph import build_graph
-from backend.orchestrator.iterative import IterativeResult, iterative_fix
+from backend.orchestrator.holistic import HolisticResult, holistic_fix
+from backend.orchestrator.iterative import iterative_fix
 from backend.orchestrator.state import PipelineState
 from backend.tools.sandbox.pool import sandbox_pool
 
@@ -38,8 +39,8 @@ from backend.tools.sandbox.pool import sandbox_pool
 # ---------------------------------------------------------------------------
 
 class _AppState:
-    pipeline = None          # compiled LangGraph (with checkpointer)
-    checkpointer = None      # AsyncSqliteSaver context manager handle
+    pipeline: Any = None          # compiled LangGraph (with checkpointer)
+    checkpointer: Any = None      # AsyncSqliteSaver context manager handle
 
 
 _state = _AppState()
@@ -148,6 +149,12 @@ def health() -> dict[str, object]:
         "sandbox_pool_idle": len(sandbox_pool._idle),
         "checkpointing": _state.checkpointer is not None,
     }
+
+
+@app.post("/api/fix-all")
+async def fix_all(payload: RawInput, max_passes: int = 3) -> HolisticResult:
+    """Holistic fix: fix the whole file in one pass, verify by running, re-fix if it crashes."""
+    return await holistic_fix(payload.code, payload.filename, max_passes=max_passes)
 
 
 @app.post("/api/input/handle")

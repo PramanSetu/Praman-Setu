@@ -61,19 +61,32 @@ def _sb(exit_code: int = 0, stdout: str = "", stderr: str = "") -> SandboxResult
     return SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=False, duration_s=0.01)
 
 
-def _fake_execute(mypy_exit: int = 0, pytest_exit: int = 0, mypy_out: str = "", pytest_out: str = ""):
+def _fake_execute(
+    mypy_exit: int = 0,
+    pytest_exit: int = 0,
+    repro_exit: int = 1,
+    marker: str = "if b == 0",
+    mypy_out: str = "",
+    pytest_out: str = "",
+):
     async def execute(language, code, cmd=None, timeout=None):
         if cmd and cmd[0] == "mypy":
             return _sb(mypy_exit, mypy_out)
         if cmd and cmd[0] == "pytest":
-            return _sb(pytest_exit, pytest_out)
+            # The patched module contains the marker; the original (reproduction)
+            # module does not. repro_exit defaults to 1 = test fails on original.
+            if marker in code:
+                return _sb(pytest_exit, pytest_out)
+            return _sb(repro_exit)
         return _sb(0)
 
     return execute
 
 
-def _wire(monkeypatch, *, mypy_exit=0, pytest_exit=0, findings=None, verdict="neutral"):
-    monkeypatch.setattr(validator_mod.sandbox_pool, "execute", _fake_execute(mypy_exit, pytest_exit))
+def _wire(monkeypatch, *, mypy_exit=0, pytest_exit=0, repro_exit=1, findings=None, verdict="neutral"):
+    monkeypatch.setattr(
+        validator_mod.sandbox_pool, "execute", _fake_execute(mypy_exit, pytest_exit, repro_exit)
+    )
     monkeypatch.setattr(
         validator_mod,
         "scan_code",
@@ -295,17 +308,31 @@ async def test_security_regression_fails_gate5(monkeypatch) -> None:
     assert report.gate_results["gate_5"].passed is False
 
 
+async def test_test_passing_on_original_is_rejected_as_false_pass(monkeypatch) -> None:
+    # repro_exit=0 → the generated test PASSES on the original code, so it does not
+    # reproduce the bug. Even though every other gate is green, this is a false pass.
+    _wire(monkeypatch, repro_exit=0)
+    report = await run_validator(_patch(), _ctx(), _diag())
+    assert report.overall_passed is False
+    assert report.gate_results["reproduction"].passed is False
+    assert report.gate_results["gate_4"].passed is True  # passes on patched...
+    # ...but rejected because it also passes on the original.
+
+
 # --- opt-in real integration ---
 
 
 @pytest.mark.integration
-async def test_real_validator_passes_a_guarded_patch() -> None:
-    """Runs the real 5 gates through Docker. Requires the sandbox image built."""
+async def test_real_validator_passes_a_behavioral_patch() -> None:
+    """Runs the real gates through Docker on a behavioral fix.
+
+    The test asserts the FIXED behavior, so it fails on the original (bug present)
+    and passes on the patched code — exercising the reproduction gate end-to-end.
+    """
     ctx = _ctx()
-    diag = _diag(
-        test="import pytest\n\ndef test_zero():\n    with pytest.raises(ZeroDivisionError):\n        divide(1, 0)\n"
-    )
-    report = await run_validator(_patch(), ctx, diag)
-    assert report.gate_results["gate_1"].passed is True
-    assert report.gate_results["gate_4"].passed is True
+    patch = _patch(code="def divide(a, b):\n    if b == 0:\n        return 0\n    return a / b")
+    diag = _diag(test="def test_zero():\n    assert divide(1, 0) == 0\n")
+    report = await run_validator(patch, ctx, diag)
+    assert report.gate_results["reproduction"].passed is True  # test fails on original
+    assert report.gate_results["gate_4"].passed is True        # test passes on patched
     assert report.overall_passed is True

@@ -5,21 +5,16 @@ loop: fix a bug, splice the patch into the full module, re-run from the input
 handler so the *next* error surfaces, and repeat until the code runs clean, gets
 stuck (can't fix / no progress), or hits the iteration cap.
 
-Stateful re-entry optimisation
-───────────────────────────────
-After a successful fix the ContextPackage from the previous iteration is carried
-forward into the next PipelineState.  Because run_context_builder in graph.py has
-a skip-guard (``if state.context_package is not None: return {}``), the tree-sitter
-parse + stdlib AST enrichment are skipped entirely for subsequent iterations.  Only
-the Input Handler re-run (unavoidable — must discover the next crash in the changed
-code) and the LLM calls (unavoidable — different bug each time) remain.
+Proof model
+───────────
+A fix is accepted if EITHER a per-bug behavioral test proves it (``behavioral_test``)
+OR the whole patched program now runs end-to-end without crashing (``runs_clean``) /
+progresses past this crash (``runs_further``). The integration proof lets us fix
+bugs whose behavior is awkward to unit-test (e.g. side-effecting print functions).
 
-The reused ContextPackage has its ``full_code`` updated to the newly-spliced code
-and ``error_line`` / ``error_node`` / ``error_window_with_lines`` cleared so the
-Diagnoser receives the fresh runtime trace from the new ProcessedInput rather than
-stale window text.  All structural fields (imports, callers, callees, constants,
-enclosing_class) are reused as-is — they are properties of the module structure,
-not of the specific bug.
+Note: the ContextPackage is rebuilt fresh each iteration. Carrying it forward is
+unsafe — consecutive bugs are usually in *different* functions, so the function
+source / signature / call graph are bug-specific, not module invariants.
 """
 from __future__ import annotations
 
@@ -27,11 +22,17 @@ from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel
 
+from backend.agents.patcher import PatcherAgent
 from backend.input_handler.models import ProcessedInput, RawInput
 from backend.input_handler.service import smart_input_handler
+from backend.llm.client import llm_client
 from backend.orchestrator.graph import build_graph
-from backend.orchestrator.state import ContextPackage, PipelineState
+from backend.orchestrator.state import DiagnoserOutput, Hypothesis, PipelineState
+from backend.tools.context_builder import context_builder
 from backend.tools.validator import splice_patched_module
+
+# (candidate_code, patch_target, root_cause) or None if no testless fix was produced.
+TestlessFix = tuple[str, str, str]
 
 
 class InputHandler(Protocol):
@@ -42,11 +43,21 @@ class Graph(Protocol):
     async def ainvoke(self, state: PipelineState) -> dict[str, Any]: ...
 
 
+class TestlessFixer(Protocol):
+    async def __call__(self, processed: ProcessedInput) -> TestlessFix | None: ...
+
+
 class FixStep(BaseModel):
     iteration: int
     error_type: str | None
     error_line: int | None
     fixed: bool
+    # How the fix was proven:
+    #   "behavioral_test" — a generated test fails-on-original, passes-on-patched
+    #   "runs_clean"      — whole program now runs end-to-end without crashing
+    #   "runs_further"    — program progressed past this crash (new crash surfaced)
+    #   ""                — not fixed
+    proof: str = ""
     patch_target: str | None = None
     detail: str = ""
 
@@ -68,100 +79,100 @@ async def iterative_fix(
     handler: InputHandler = smart_input_handler,
     graph: Graph | None = None,
     on_step: Callable[[FixStep], None] | None = None,
+    testless_fixer: TestlessFixer | None = None,
 ) -> IterativeResult:
     """Fix bugs one-at-a-time, re-running the pipeline after each splice.
 
     ``on_step`` is an optional callback invoked after each FixStep is recorded.
-    The SSE endpoint in main.py uses it to emit steps as they complete.
+    ``testless_fixer`` is the fallback used when the graph produces no patch
+    (e.g. the Diagnoser couldn't write a behavioral test); it patches directly
+    from the error and is proven by integration. Injectable for tests.
     """
     if graph is None:
         graph = build_graph()
+    fixer: TestlessFixer = testless_fixer or _testless_fix
 
     current_code = code
     steps: list[FixStep] = []
     bugs_fixed = 0
     status: Literal["clean", "stuck", "max_iterations", "timeout"] = "max_iterations"
 
-    # Carried across iterations — populated after the first successful fix.
-    # None on the first iteration so the graph runs the full ContextBuilder.
-    prior_context: ContextPackage | None = None
+    # The candidate run after each accepted fix doubles as the NEXT iteration's
+    # input, so we run the handler once per iteration, not twice.
+    processed = await handler.handle(RawInput(code=current_code, filename=filename))
 
     for iteration in range(1, max_iterations + 1):
-        processed = await handler.handle(RawInput(code=current_code, filename=filename))
-
         if processed.status == "execution_clean":
             status = "clean"
             break
         if processed.status == "execution_timeout":
             status = "timeout"
-            step = _step(iteration, processed, fixed=False, detail="execution timed out")
-            steps.append(step)
-            if on_step:
-                on_step(step)
+            _record(steps, on_step, _step(iteration, processed, fixed=False, detail="execution timed out"))
             break
 
-        # Re-use the prior ContextPackage when available (skip the tree-sitter
-        # parse + AST enrichment — they are unchanged after a function-level splice).
-        reused_context = _try_reuse_context(prior_context, processed, current_code)
-
+        # Rebuild context fresh each iteration (context_package left None) — the next
+        # bug is usually in a different function, so reuse would be stale.
         final = await graph.ainvoke(
-            PipelineState(
-                raw_input=processed,
-                language=processed.language,
-                context_package=reused_context,
-            )
+            PipelineState(raw_input=processed, language=processed.language)
         )
         report = final.get("validator_report")
         patch = final.get("patcher_output")
         context = final.get("context_package")
-        fixed = bool(report and report.overall_passed and patch and patch.patched_code and context)
+        behavioral = bool(report and report.overall_passed)
 
-        if not fixed:
-            detail = (patch.blocked_reason if patch and patch.blocked_reason else "could not fix") or ""
-            step = _step(iteration, processed, fixed=False, detail=detail)
-            steps.append(step)
-            if on_step:
-                on_step(step)
+        candidate: str | None = None
+        target: str | None = None
+        root = ""
+        if patch and patch.patched_code and context:
+            try:
+                candidate = splice_patched_module(context, patch.patched_code, patch.patch_target_source)
+                target = patch.patch_target
+                root = _root_cause(final)
+            except ValueError:
+                candidate = None
+
+        if candidate is None:
+            # Graph produced no usable patch (Diagnoser asked for clarification /
+            # dead-ended, or splice failed). Patch directly from the error and let
+            # integration proof decide.
+            fallback = await fixer(processed)
+            if fallback is None:
+                detail = (patch.blocked_reason if patch and patch.blocked_reason else "could not fix") or ""
+                _record(steps, on_step, _step(iteration, processed, fixed=False, detail=detail))
+                status = "stuck"
+                break
+            candidate, target, root = fallback
+            behavioral = False
+
+        if candidate.strip() == current_code.strip():  # no change — avoid spinning
+            _record(steps, on_step, _step(iteration, processed, fixed=False, detail="patch made no change"))
             status = "stuck"
             break
 
-        assert patch is not None and context is not None  # narrowed by `fixed`
-        try:
-            new_code = splice_patched_module(context, patch.patched_code, patch.patch_target_source)
-        except ValueError as exc:
-            step = _step(iteration, processed, fixed=False, detail=f"splice failed: {exc}")
-            steps.append(step)
-            if on_step:
-                on_step(step)
-            status = "stuck"
-            break
-
-        step = _step(
-            iteration, processed, fixed=True, target=patch.patch_target, detail=_root_cause(final)
+        # INTEGRATION PROOF: run the whole candidate program. Accept the fix if a
+        # per-bug test proved it OR the program now runs clean / progressed past
+        # this crash. This run also feeds the next iteration.
+        next_processed = await handler.handle(RawInput(code=candidate, filename=filename))
+        runs_clean = next_processed.status == "execution_clean"
+        same_bug = (
+            next_processed.error_line == processed.error_line
+            and next_processed.error_type == processed.error_type
         )
-        steps.append(step)
-        if on_step:
-            on_step(step)
+        progressed = runs_clean or not same_bug
 
-        if new_code == current_code:  # no progress — avoid spinning
+        if not (behavioral or progressed):
+            _record(steps, on_step, _step(iteration, processed, fixed=False, detail="patch did not get past the crash"))
             status = "stuck"
             break
 
-        current_code = new_code
+        proof = "behavioral_test" if behavioral else ("runs_clean" if runs_clean else "runs_further")
+        _record(
+            steps, on_step,
+            _step(iteration, processed, fixed=True, proof=proof, target=target, detail=root),
+        )
+        current_code = candidate
         bugs_fixed += 1
-
-        # Carry the context package forward; update full_code to the spliced module.
-        # The skip-guard in run_context_builder will skip the parse next iteration.
-        prior_context = context.model_copy(
-            update={
-                "full_code": new_code,
-                # Clear error-specific fields — the Diagnoser will use the fresh
-                # runtime_trace from the new ProcessedInput instead.
-                "error_line": None,
-                "error_node": "",
-                "error_window_with_lines": "",
-            }
-        )
+        processed = next_processed   # carry the candidate run forward
 
     return IterativeResult(
         status=status,
@@ -173,41 +184,59 @@ async def iterative_fix(
     )
 
 
-def _try_reuse_context(
-    prior: ContextPackage | None,
-    processed: ProcessedInput,
-    new_code: str,
-) -> ContextPackage | None:
-    """Return a refreshed copy of `prior` suitable for the next iteration.
+def _synth_diagnosis(processed: ProcessedInput) -> DiagnoserOutput:
+    """A minimal diagnosis straight from the error — no behavioral test required.
 
-    Returns None on the first iteration (prior is None) so the ContextBuilder
-    runs normally.  On subsequent iterations, updates full_code and clears
-    error-specific fields so the Diagnoser reads from the fresh runtime_trace.
+    The trivial passing test imposes no contract; the Patcher fixes from the error
+    + fix_direction, and integration proof verifies the whole program runs.
     """
-    if prior is None:
-        return None
-    return prior.model_copy(
-        update={
-            "full_code": new_code,
-            "error_line": processed.error_line,
-            # Keep error_node/window empty — ContextBuilder skip-guard fires,
-            # so these won't be re-populated.  The Diagnoser's primary evidence
-            # comes from runtime_trace (injected via ProcessedInput), not the window.
-            "error_node": "",
-            "error_window_with_lines": "",
-        }
+    error_type = processed.error_type or "error"
+    line = processed.error_line
+    root = processed.error_message or f"{error_type} at line {line}"
+    fix_dir = f"Fix the {error_type} at line {line} with the smallest correct change. {processed.error_message}".strip()
+    return DiagnoserOutput(
+        root_cause=root,
+        hypotheses=[
+            Hypothesis(id="H1", theory=root, confidence=0.7, fix_direction=fix_dir),
+            Hypothesis(id="H2", theory="an alternative cause of the same error", confidence=0.2, fix_direction="consider a different cause"),
+            Hypothesis(id="H3", theory="an unhandled edge case", confidence=0.1, fix_direction="handle the edge case"),
+        ],
+        generated_test="def test_runs():\n    assert True\n",
     )
 
 
-def _step(iteration, processed, *, fixed, target=None, detail=""):
+async def _testless_fix(processed: ProcessedInput) -> TestlessFix | None:
+    """Patch directly from the error (no Diagnoser test). Proven by integration."""
+    try:
+        ctx = await context_builder.build(processed)
+        patch = await PatcherAgent(llm_client).patch(ctx, _synth_diagnosis(processed))
+    except Exception:
+        return None
+    if not patch.patched_code:
+        return None
+    try:
+        candidate = splice_patched_module(ctx, patch.patched_code, patch.patch_target_source)
+    except ValueError:
+        return None
+    return candidate, patch.patch_target, _synth_diagnosis(processed).root_cause
+
+
+def _step(iteration, processed, *, fixed, proof="", target=None, detail=""):
     return FixStep(
         iteration=iteration,
         error_type=processed.error_type,
         error_line=processed.error_line,
         fixed=fixed,
+        proof=proof,
         patch_target=target,
         detail=detail[:300],
     )
+
+
+def _record(steps: list[FixStep], on_step: Callable[[FixStep], None] | None, step: FixStep) -> None:
+    steps.append(step)
+    if on_step:
+        on_step(step)
 
 
 def _root_cause(final: dict) -> str:

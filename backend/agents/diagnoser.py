@@ -16,30 +16,40 @@ class DiagnoserError(Exception):
     pass
 
 
+_DIAGNOSE_ERRORS = (ValidationError, ValueError, TypeError, DiagnoserError, TimeoutError, asyncio.TimeoutError)
+
+
 class DiagnoserAgent:
     def __init__(self, llm_client: LLMCompleter):
         self.llm = llm_client
 
     async def diagnose(self, context: ContextPackage) -> DiagnoserOutput:
-        messages = render_diagnoser_prompt(context)
+        # Structural attempt + one retry (raises only on genuinely invalid structure).
         try:
-            output = await self._complete(messages)
-            return self._validate_output(output)
-        except (ValidationError, ValueError, TypeError, DiagnoserError) as first_error:
-            retry_messages = render_diagnoser_prompt(context, retry=True)
+            output = await self._attempt(context, retry=False)
+        except _DIAGNOSE_ERRORS as first_error:
             try:
-                output = await self._complete(retry_messages)
-                return self._validate_output(output)
-            except (ValidationError, ValueError, TypeError, DiagnoserError) as retry_error:
+                output = await self._attempt(context, retry=True)
+            except _DIAGNOSE_ERRORS as retry_error:
                 raise DiagnoserError(
                     f"Invalid LLM response after retry: {retry_error}; first error: {first_error}"
                 ) from retry_error
-        except TimeoutError as exc:
-            raise DiagnoserError("LLM timeout after 10s") from exc
-        except asyncio.TimeoutError as exc:
-            raise DiagnoserError("LLM timeout after 10s") from exc
 
-        raise DiagnoserError("Diagnoser failed before producing output")
+        # If the generated test is weak, try ONCE more for a better one — but keep
+        # the best-effort diagnosis either way. We never dead-end on test quality:
+        # integration proof (whole program runs clean) is the downstream backstop.
+        if generated_test_failure(output.generated_test):
+            try:
+                improved = await self._attempt(context, retry=True)
+                if not generated_test_failure(improved.generated_test):
+                    output = improved
+            except _DIAGNOSE_ERRORS:
+                pass
+        return output
+
+    async def _attempt(self, context: ContextPackage, *, retry: bool) -> DiagnoserOutput:
+        messages = render_diagnoser_prompt(context, retry=retry)
+        return self._validate_output(await self._complete(messages))
 
     async def _complete(self, messages: list[dict[str, str]]) -> DiagnoserOutput:
         return await self.llm.complete(
@@ -75,13 +85,6 @@ class DiagnoserAgent:
             )
             for index, hypothesis in enumerate(sorted_hypotheses, start=1)
         ]
-
-        # Self-validate the generated test with the SAME guard the Validator uses,
-        # so a malformed test triggers a re-diagnosis here instead of dead-ending
-        # the patch-only retry loop downstream.
-        test_failure = generated_test_failure(output.generated_test)
-        if test_failure:
-            raise DiagnoserError(f"Generated test rejected: {test_failure}")
 
         return DiagnoserOutput(
             root_cause=output.root_cause,

@@ -59,7 +59,9 @@ except SyntaxError as _e:
     }
 
 if _compiled is not None:
-    _globals = {"__name__": "__main__", "__file__": _USER_FILE}
+    # Stub input() so headless execution proceeds past interactive reads instead
+    # of EOFError. "1" is numeric-parseable (int(input()) works), non-zero, non-empty.
+    _globals = {"__name__": "__main__", "__file__": _USER_FILE, "input": lambda *a, **k: "1"}
     sys.settrace(_tracer)
     try:
         exec(_compiled, _globals)

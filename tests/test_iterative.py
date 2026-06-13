@@ -105,17 +105,45 @@ async def test_iterative_fixes_multiple_bugs_until_clean() -> None:
     assert [s.fixed for s in result.steps] == [True, True]
 
 
-async def test_iterative_stops_when_a_bug_cannot_be_fixed() -> None:
-    class StuckGraph:
-        async def ainvoke(self, state):
-            return {"validator_report": ValidatorReport(
-                overall_passed=False, gate_results={}, safety_diff=None, summary="fail",
-                detailed_failures=["nope"]), "patcher_output": None, "context_package": None}
+class _StuckGraph:
+    async def ainvoke(self, state):
+        return {"validator_report": ValidatorReport(
+            overall_passed=False, gate_results={}, safety_diff=None, summary="fail",
+            detailed_failures=["nope"]), "patcher_output": None, "context_package": None}
 
-    result = await iterative_fix(CODE_V0, "m.py", handler=FakeHandler(), graph=StuckGraph())
+
+async def _no_testless_fix(processed):
+    return None
+
+
+async def test_iterative_stops_when_a_bug_cannot_be_fixed() -> None:
+    result = await iterative_fix(
+        CODE_V0, "m.py", handler=FakeHandler(), graph=_StuckGraph(), testless_fixer=_no_testless_fix
+    )
     assert result.status == "stuck"
     assert result.bugs_fixed == 0
     assert result.steps[-1].fixed is False
+
+
+async def test_testless_fix_fallback_via_integration_proof() -> None:
+    # The graph produces NO patch, but the testless fixer does, and the candidate
+    # runs clean → accepted via integration proof, labeled runs_clean.
+    async def fixer(processed):
+        return (CODE_V2, "function", "off-by-one")
+
+    class OneFixHandler:
+        async def handle(self, request: RawInput):
+            if request.code == CODE_V0:
+                return _processed(request.code, "execution_failed", "IndexError", 2)
+            return _processed(request.code, "execution_clean", None, None)
+
+    result = await iterative_fix(
+        CODE_V0, "m.py", handler=OneFixHandler(), graph=_StuckGraph(), testless_fixer=fixer
+    )
+    assert result.status == "clean"
+    assert result.bugs_fixed == 1
+    assert result.steps[0].fixed is True
+    assert result.steps[0].proof == "runs_clean"
 
 
 async def test_iterative_stops_on_clean_input_immediately() -> None:
@@ -126,3 +154,35 @@ async def test_iterative_stops_on_clean_input_immediately() -> None:
     result = await iterative_fix(CODE_V2, "m.py", handler=CleanHandler(), graph=FakeGraph())
     assert result.status == "clean"
     assert result.bugs_fixed == 0
+
+
+async def test_integration_proof_accepts_when_program_runs_clean() -> None:
+    # The graph FAILS behavioral validation (overall_passed=False), but the spliced
+    # candidate runs clean → accepted via integration proof, labeled "runs_clean".
+    class FailingGraph:
+        async def ainvoke(self, state):
+            ctx = ContextPackage(
+                error_node="", function_signature="def f():", imports=[], runtime_trace={},
+                language="python", full_code=CODE_V0, function_source="def f():\n    return undefined_a",
+            )
+            patch = _patcher("def f():\n    return 1", "def f():\n    return undefined_a")
+            return {
+                "validator_report": ValidatorReport(
+                    overall_passed=False, gate_results={}, safety_diff=None,
+                    summary="no test", detailed_failures=["no behavioral test"],
+                ),
+                "patcher_output": patch, "context_package": ctx, "diagnoser_output": _diag(),
+            }
+
+    class OneFixHandler:
+        # V0 crashes; after the single splice (-> V1) the program runs clean.
+        async def handle(self, request: RawInput):
+            if request.code == CODE_V0:
+                return _processed(request.code, "execution_failed", "NameError", 2)
+            return _processed(request.code, "execution_clean", None, None)
+
+    result = await iterative_fix(CODE_V0, "m.py", handler=OneFixHandler(), graph=FailingGraph())
+    assert result.status == "clean"
+    assert result.bugs_fixed == 1
+    assert result.steps[0].fixed is True
+    assert result.steps[0].proof == "runs_clean"

@@ -18,7 +18,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     # Classification / reasoning — intended to be an 8B model eventually.
     "diagnoser": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
     # Code generation — intended to be a 32B code model.
-    "patcher": ModelSpec(primary="qwen/qwen3-32b", fallback="qwen2.5-coder:14b"),
+    "patcher": ModelSpec(primary="qwen/qwen3-32b", fallback="qwen2.5-coder:7b"),
     # Strategic retry decision — small/fast.
     "reflector": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
 }
@@ -26,3 +26,13 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 
 def model_for(role: str) -> ModelSpec:
     return MODEL_REGISTRY[role]
+
+
+# Reverse map so the client can translate a Groq model id to its local Ollama
+# equivalent when running in Ollama-only mode (DEFAULT_LLM_PROVIDER=ollama).
+_GROQ_TO_OLLAMA = {spec.primary: spec.fallback for spec in MODEL_REGISTRY.values()}
+
+
+def ollama_equivalent(model: str) -> str:
+    """Map a Groq model id to its configured local Ollama model (passthrough if unknown)."""
+    return _GROQ_TO_OLLAMA.get(model, model)
