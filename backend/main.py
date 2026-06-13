@@ -13,6 +13,7 @@ Per-request:
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -21,7 +22,10 @@ from typing import Any, AsyncGenerator
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
+from backend.agents.critic import CriticAgent, CritiqueReport
+from backend.agents.explainer import ExplainerAgent, RepairExplanation
 from backend.config import settings
 from backend.input_handler import ProcessedInput, RawInput, smart_input_handler
 from backend.input_handler.detector import UnsupportedLanguageError
@@ -197,13 +201,34 @@ async def analyze(payload: RawInput, debug: bool = False) -> dict[str, object]:
     return response
 
 
+class RepairV2Response(BaseModel):
+    result: RepairV2Result
+    explanation: RepairExplanation | None = None
+    critique: CritiqueReport | None = None
+
+
 @app.post("/api/repair-v2")
-async def repair_v2_endpoint(payload: RawInput, max_passes: int = 3) -> RepairV2Result:
-    """Primary pasted-file repair path: bug ledger -> exact edits -> full-file validation."""
+async def repair_v2_endpoint(
+    payload: RawInput, max_passes: int = 3, explain: bool = True, critique: bool = True
+) -> RepairV2Response:
+    """Primary pasted-file repair path: bug ledger -> AST unit splice -> full-file validation.
+
+    With ``explain=true`` (default) a human-readable narrative is attached.
+    With ``critique=true`` (default) a semantic review (root-cause / intent /
+    confidence) is attached, whose ``needs_human_review`` is the authoritative
+    flag list.
+    """
     try:
-        return await repair_v2(payload.code, payload.filename, max_passes=max_passes)
+        result = await repair_v2(payload.code, payload.filename, max_passes=max_passes)
     except UnsupportedLanguageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Explainer and Critic are independent — run them concurrently (one round-trip).
+    exp_task = asyncio.ensure_future(ExplainerAgent(llm_client).explain(result)) if explain else None
+    crit_task = asyncio.ensure_future(CriticAgent(llm_client).review(result)) if critique else None
+    explanation = await exp_task if exp_task is not None else None
+    critique_report = await crit_task if crit_task is not None else None
+    return RepairV2Response(result=result, explanation=explanation, critique=critique_report)
 
 
 @app.post("/api/fix")

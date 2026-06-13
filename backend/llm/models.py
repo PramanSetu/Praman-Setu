@@ -21,6 +21,10 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "patcher": ModelSpec(primary="qwen/qwen3-32b", fallback="qwen2.5-coder:7b"),
     # Strategic retry decision — small/fast.
     "reflector": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
+    # Human-readable repair narrative — small/fast, no code generation.
+    "explainer": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
+    # Semantic review of the fix (root-cause / intent / confidence) — reasoning.
+    "critic": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
 }
 
 
