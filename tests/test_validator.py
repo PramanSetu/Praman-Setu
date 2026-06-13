@@ -17,6 +17,16 @@ from backend.tools.diff_regression import ScanResult
 from backend.tools.sandbox.executor import SandboxResult
 from backend.tools.validator import build_test_module, run_validator, splice_patched_module
 
+
+@pytest.fixture(autouse=True)
+def _clear_validator_caches():
+    """Reset process-level caches between tests so mocks aren't bypassed."""
+    validator_mod._ORIG_MYPY_CACHE.clear()
+    validator_mod._PATCHED_SCAN_CACHE.clear()
+    yield
+    validator_mod._ORIG_MYPY_CACHE.clear()
+    validator_mod._PATCHED_SCAN_CACHE.clear()
+
 ORIGINAL_FULL = "def divide(a, b):\n    return a / b\n\ndivide(1, 0)"
 ORIGINAL_FUNC = "def divide(a, b):\n    return a / b"
 PATCHED_FUNC = "def divide(a, b):\n    if b == 0:\n        raise ZeroDivisionError('no')\n    return a / b"

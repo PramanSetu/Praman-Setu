@@ -11,8 +11,9 @@ dependencies = [
     "pydantic-settings>=2.7",
     "httpx[http2]>=0.28",
     "python-multipart>=0.0.18",
-    "docker>=7.1",           # SandboxPool talks to the Docker daemon
+    "docker>=7.1", # SandboxPool talks to the Docker daemon
     "langgraph>=1.2.4",
+    "langgraph-checkpoint-sqlite>=2.0", # async SQLite checkpointer for pipeline fault tolerance
     "tree-sitter>=0.22.0",
     "tree-sitter-python>=0.23.0",
     # Heavier deps deferred until the modules that need them land, to keep the

@@ -70,6 +70,8 @@ class ContextBuilder:
         target_row = _bounded_target_row(error_line, len(lines))
 
         func_node = _find_enclosing_function(tree.root_node, target_row)
+        if func_node is None:
+            func_node = _find_any_function(tree.root_node)
         enriched = _extract_python_ast_enrichment(code, target_row)
         return AstContext(
             error_node=_line_window(lines, target_row),
@@ -126,6 +128,16 @@ def _find_enclosing_function(node: Node, target_row: int) -> Node | None:
             found = child_match
 
     return found
+
+
+def _find_any_function(node: Node) -> Node | None:
+    if node.type == "function_definition":
+        return node
+    for child in node.children:
+        match = _find_any_function(child)
+        if match is not None:
+            return match
+    return None
 
 
 def _first_child_of_type(node: Node, types: set[str]) -> Node | None:
@@ -255,6 +267,9 @@ def _enclosing_ast_function(
         and node.lineno <= line_no <= (getattr(node, "end_lineno", node.lineno) or node.lineno)
     ]
     if not matches:
+        for node in ast.walk(module):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node
         return None
     return max(matches, key=lambda node: node.lineno)
 

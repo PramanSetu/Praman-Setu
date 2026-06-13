@@ -31,6 +31,9 @@ GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Back-compat aliases sourced from the registry (single source of truth).
 GROQ_PRIMARY_MODEL = model_for("diagnoser").primary
 OLLAMA_FALLBACK_MODEL = model_for("diagnoser").fallback
+# Floor timeout (seconds) for the local Ollama fallback — CPU inference on a
+# code model can take minutes, so the Groq budget is far too short here.
+OLLAMA_FALLBACK_TIMEOUT = 240.0
 
 
 class LLMClient:
@@ -96,6 +99,9 @@ class LLMClient:
         except (httpx.HTTPError, TimeoutError):
             if model == fallback_model:
                 raise
+            # Local Ollama runs on CPU — a single completion can take minutes,
+            # far longer than the Groq budget. Give the fallback its own timeout
+            # so it isn't killed before the model has a chance to respond.
             result, usage = await self._timed_call(
                 self.ollama_chat_completions_url,
                 model=fallback_model,
@@ -104,7 +110,7 @@ class LLMClient:
                 schema=schema,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=timeout,
+                timeout=max(timeout, OLLAMA_FALLBACK_TIMEOUT),
                 use_json_schema=False,
                 reasoning_effort=None,
                 reasoning_format=None,

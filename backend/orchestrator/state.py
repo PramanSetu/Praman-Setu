@@ -18,6 +18,8 @@ class DetectionMethod(str, Enum):
     EXTENSION = "extension"
     SHEBANG = "shebang"
     AST_PARSE = "ast_parse"
+    TRACEBACK = "traceback"
+    HEURISTIC = "heuristic"
 
 
 class LanguageDetection(BaseModel):
@@ -100,7 +102,7 @@ class PatcherOutput(BaseModel):
     unified_diff: str = Field(min_length=1)      # for display only
     confidence: float = Field(ge=0.0, le=1.0)
     approach: str = Field(min_length=1)
-    patch_target: Literal["function", "caller", "callee", "class"] = "function"
+    patch_target: Literal["function", "caller", "callee", "class", "module"] = "function"
     patch_target_source: str = ""
     hypothesis_used: str = "H1"
     lines_changed: int = 0

@@ -18,7 +18,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     # Classification / reasoning — intended to be an 8B model eventually.
     "diagnoser": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
     # Code generation — intended to be a 32B code model.
-    "patcher": ModelSpec(primary="qwen/qwen3-32b", fallback="qwen2.5-coder:14b"),
+    "patcher": ModelSpec(primary="qwen/qwen3-32b", fallback="qwen2.5-coder:7b"),
     # Strategic retry decision — small/fast.
     "reflector": ModelSpec(primary="meta-llama/llama-4-scout-17b-16e-instruct", fallback="llama3.1:8b"),
 }

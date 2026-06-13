@@ -23,7 +23,7 @@ class SmartInputHandler:
         self._sandbox = sandbox
 
     async def handle(self, request: RawInput) -> ProcessedInput:
-        detection = detect_python_language(request.code, request.filename)
+        detection = detect_python_language(request.code, request.filename, request.error_message)
         line_count = len(request.code.splitlines()) or 1
 
         execution: SandboxExecution | None = None
