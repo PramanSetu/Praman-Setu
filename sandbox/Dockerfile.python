@@ -22,6 +22,11 @@ RUN pip install --no-cache-dir \
         bandit \
         "semgrep>=1.0"
 
+# Property-based testing. Hypothesis generates and shrinks adversarial inputs, so
+# a structural property like `max(xs) in xs` automatically finds the all-negative
+# counterexample instead of relying on hand-picked example inputs.
+RUN pip install --no-cache-dir hypothesis
+
 # Non-root user (uid 1000 matches the runtime `--user=1000:1000`).
 RUN useradd -m sandboxuser
 

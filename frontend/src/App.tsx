@@ -38,10 +38,11 @@ const STAGES = [
   "Validator",
   "Explainer Agent",
   "Critic Agent",
+  "Property Tester",
 ] as const;
 
 type StageName = (typeof STAGES)[number];
-type StageState = "pending" | "running" | "done" | "failed";
+type StageState = "pending" | "running" | "done" | "failed" | "skipped";
 type RunStatus = "idle" | "running" | "clean" | "unresolved" | "no_progress" | "insecure" | "error";
 type Tab = "final" | "issues" | "attempts" | "explanation" | "review";
 
@@ -86,8 +87,10 @@ type FixAssessment = {
 
 type LogicConcern = {
   location?: string;
+  axis?: string;
   issue?: string;
   severity?: string;
+  needs_intent?: boolean;
 };
 
 type Critique = {
@@ -96,6 +99,25 @@ type Critique = {
   assessments?: FixAssessment[];
   logic_audit?: LogicConcern[];
   needs_human_review?: string[];
+};
+
+type ProvenIssue = {
+  test?: string;
+  detail?: string;
+};
+
+type PropertyReport = {
+  status?: string;
+  summary?: string;
+  proven_issues?: ProvenIssue[];
+};
+
+type Finding = {
+  tier?: string;
+  category?: string;
+  location?: string;
+  detail?: string;
+  source?: string;
 };
 
 type ResultPayload = {
@@ -149,6 +171,8 @@ export function App() {
   const [attempts, setAttempts] = useState<RepairAttempt[]>([]);
   const [explanation, setExplanation] = useState<Explanation | null>(null);
   const [critique, setCritique] = useState<Critique | null>(null);
+  const [property, setProperty] = useState<PropertyReport | null>(null);
+  const [findings, setFindings] = useState<Finding[]>([]);
   const [result, setResult] = useState<ResultPayload | null>(null);
   const [streamLog, setStreamLog] = useState<string[]>([]);
   const [, setRunError] = useState("");
@@ -168,7 +192,9 @@ export function App() {
   }, []);
 
   const displayCode = result?.final_code ?? latestCode;
-  const reviewItems = critique?.needs_human_review ?? explanation?.flagged ?? [];
+  // Hide INFO-level ledger context markers (top_level_execution / top_level_input)
+  // — they're agent context, not user-facing bugs. Show only error/warning issues.
+  const realIssues = issues.filter((issue) => (issue.severity ?? "info") !== "info");
   const isRunning = status === "running";
 
   async function repair() {
@@ -223,6 +249,8 @@ export function App() {
     setAttempts([]);
     setExplanation(null);
     setCritique(null);
+    setProperty(null);
+    setFindings([]);
     setResult(null);
     setStageStates(
       Object.fromEntries(STAGES.map((stage) => [stage, "pending"])) as Record<StageName, StageState>,
@@ -293,6 +321,12 @@ export function App() {
       return;
     }
 
+    if (eventType === "property") {
+      completeStage("Property Tester");
+      setProperty((payload.property as PropertyReport | undefined) ?? null);
+      return;
+    }
+
     if (eventType === "done") {
       const nextResult = payload.result as ResultPayload | undefined;
       setResult(nextResult ?? null);
@@ -302,7 +336,23 @@ export function App() {
       setLatestCode(nextResult?.final_code ?? latestCode);
       setExplanation((payload.explanation as Explanation | null) ?? explanation);
       setCritique((payload.critique as Critique | null) ?? critique);
+      setProperty((payload.property as PropertyReport | null) ?? property);
+      setFindings((payload.findings as Finding[] | undefined) ?? []);
       setActiveStage(null);
+      // Finalize the strip: a stage that never ran was skipped (e.g. Repair Agent
+      // and Patch Applier when the code was already clean), and any still-running
+      // stage is now done.
+      setStageStates((current) => {
+        const next = { ...current };
+        for (const stage of STAGES) {
+          if (next[stage] === "pending") {
+            next[stage] = "skipped";
+          } else if (next[stage] === "running") {
+            next[stage] = "done";
+          }
+        }
+        return next;
+      });
       return;
     }
 
@@ -379,7 +429,7 @@ export function App() {
               Final Code
             </TabButton>
             <TabButton active={activeTab === "issues"} onClick={() => setActiveTab("issues")}>
-              Issues {issues.length ? `(${issues.length})` : ""}
+              Issues {realIssues.length ? `(${realIssues.length})` : ""}
             </TabButton>
             <TabButton active={activeTab === "attempts"} onClick={() => setActiveTab("attempts")}>
               Attempts {attempts.length ? `(${attempts.length})` : ""}
@@ -388,16 +438,16 @@ export function App() {
               Explanation
             </TabButton>
             <TabButton active={activeTab === "review"} onClick={() => setActiveTab("review")}>
-              Human Review {reviewItems.length ? `(${reviewItems.length})` : ""}
+              Human Review {findings.length ? `(${findings.length})` : ""}
             </TabButton>
           </nav>
 
           <div className="tab-content">
             {activeTab === "final" && <FinalCode original={code} code={displayCode} />}
-            {activeTab === "issues" && <Issues issues={issues} />}
+            {activeTab === "issues" && <Issues issues={realIssues} />}
             {activeTab === "attempts" && <Attempts attempts={attempts} />}
             {activeTab === "explanation" && <ExplanationPanel explanation={explanation} />}
-            {activeTab === "review" && <ReviewPanel critique={critique} fallbackItems={reviewItems} />}
+            {activeTab === "review" && <ReviewPanel critique={critique} findings={findings} />}
           </div>
 
           <footer className="stream-footer">
@@ -563,13 +613,18 @@ function ExplanationPanel({ explanation }: { explanation: Explanation | null }) 
   );
 }
 
-function ReviewPanel({ critique, fallbackItems }: { critique: Critique | null; fallbackItems: string[] }) {
-  const reviewItems = critique?.needs_human_review ?? fallbackItems;
-  const logicAudit = critique?.logic_audit ?? [];
+const TIERS: { key: string; label: string; pill: string; card: string }[] = [
+  { key: "confirmed", label: "Confirmed bugs", pill: "high", card: "proven" },
+  { key: "likely", label: "Likely bugs", pill: "medium", card: "warning" },
+  { key: "potential", label: "Potential issues", pill: "low", card: "" },
+  { key: "style", label: "Style suggestions", pill: "unassessed", card: "" },
+];
+
+function ReviewPanel({ critique, findings }: { critique: Critique | null; findings: Finding[] }) {
   const assessments = critique?.assessments ?? [];
 
-  if (!critique && !reviewItems.length) {
-    return <EmptyState title="No human review items" detail="The Critic Agent output appears here." />;
+  if (!findings.length && !critique) {
+    return <EmptyState title="No findings" detail="The reviewers' classified findings appear here." />;
   }
 
   return (
@@ -584,29 +639,30 @@ function ReviewPanel({ critique, fallbackItems }: { critique: Critique | null; f
         </article>
       )}
 
-      {reviewItems.length > 0 && (
-        <Section title="Needs human review" count={reviewItems.length}>
-          {reviewItems.map((item) => (
-            <article className="issue-card warning" key={item}>
-              <p>{item}</p>
-            </article>
-          ))}
-        </Section>
-      )}
+      {findings.length === 0 && <p className="muted" style={{ padding: "0 12px" }}>No latent issues found.</p>}
 
-      {logicAudit.length > 0 && (
-        <Section title="Latent logic audit" count={logicAudit.length}>
-          {logicAudit.map((concern, index) => (
-            <article className="issue-card warning" key={`logic-${index}`}>
-              <div className="card-head">
-                <span className={`pill ${concern.severity ?? "medium"}`}>{concern.severity ?? "medium"}</span>
-                <code className="card-target">{concern.location ?? "unknown"}</code>
-              </div>
-              <p>{concern.issue ?? "No detail provided."}</p>
-            </article>
-          ))}
-        </Section>
-      )}
+      {TIERS.map((tier) => {
+        const items = findings.filter((f) => (f.tier ?? "potential") === tier.key);
+        if (!items.length) {
+          return null;
+        }
+        return (
+          <Section title={tier.label} count={items.length} key={tier.key}>
+            {items.map((f, index) => (
+              <article className={`issue-card ${tier.card}`} key={`${tier.key}-${index}`}>
+                <div className="card-head">
+                  <span className={`pill ${tier.pill}`}>{tier.key}</span>
+                  {f.category && f.category !== "other" && f.category !== "property" && (
+                    <span className="axis-tag">{f.category.replace(/_/g, " ")}</span>
+                  )}
+                  {f.location && <code className="card-target">{f.location}</code>}
+                </div>
+                <p>{f.detail ?? ""}</p>
+              </article>
+            ))}
+          </Section>
+        );
+      })}
 
       {assessments.length > 0 && (
         <Section title="Fix assessments" count={assessments.length}>

@@ -207,6 +207,15 @@ button {
   background: var(--red-dim);
 }
 
+.stage.skipped {
+  color: var(--fg-dim);
+  opacity: 0.65;
+}
+
+.stage.skipped span {
+  border-style: dashed;
+}
+
 .chevron {
   color: var(--border-strong);
 }
@@ -504,6 +513,11 @@ button {
   border-color: rgba(204, 167, 0, 0.5);
 }
 
+.issue-card.proven {
+  border-color: var(--red);
+  background: var(--red-dim);
+}
+
 .pill.error,
 .pill.warning {
   border-color: var(--amber);
@@ -586,6 +600,17 @@ button {
 .card-target {
   color: var(--fg);
   font-size: 12px;
+}
+
+.axis-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .verdict-row {

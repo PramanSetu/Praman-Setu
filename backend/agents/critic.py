@@ -38,13 +38,28 @@ class FixAssessment(BaseModel):
     concern: str = ""                          # required when any verdict is negative/low
 
 
+# General programming-correctness axes — domain-agnostic categories of how code
+# goes wrong, NOT facts about any particular application.
+LogicAxis = Literal[
+    "return_contract",   # a returned success/failure or result value is dropped/wrong
+    "boundary",          # off-by-one, > vs >=, inclusive/exclusive ranges
+    "init_value",        # accumulator / min / max / counter seeded wrong
+    "invariant",         # a state invariant the code clearly implies is broken
+    "edge_case",         # empty / zero / negative / None / single-element input
+    "shared_state",      # mutating a caller's object or a shared/default structure
+    "other",
+]
+
+
 class LogicConcern(BaseModel):
     """A suspected latent logic bug in the working code — something that runs fine
     but is probably wrong (and so was never surfaced as a crash or syntax error)."""
 
     location: str = Field(min_length=1)        # function / line / area
-    issue: str = Field(min_length=1)           # the suspected logic flaw, concretely
+    axis: LogicAxis = "other"                  # which general correctness axis failed
+    issue: str = Field(min_length=1)           # the suspected flaw (or, if needs_intent, a question)
     severity: Literal["high", "medium", "low"] = "medium"
+    needs_intent: bool = False                 # True => correctness depends on the user's intent
 
 
 class CritiqueReport(BaseModel):
@@ -56,40 +71,67 @@ class CritiqueReport(BaseModel):
 
 
 _SYSTEM_PROMPT = """\
-You are Praman Setu Critic. The repair you are reviewing has ALREADY been proven
-in a sandbox: it compiles, runs without errors, and passes a security scan. Do
-NOT re-check or comment on whether it runs, compiles, or is secure — that is
-settled. Your job is the things execution cannot decide. You have TWO jobs.
+You are Praman Setu Critic. The repair already compiles, runs clean, and passed a
+security scan — do NOT re-check or comment on that; it is settled. You judge only
+what execution cannot decide. You are given the fixes and a list of issues a
+static linter ALREADY found deterministically — do not re-report those.
 
-JOB 1 — Review the fixes (the diff between original and final):
-1. Root cause vs symptom masking — does each fix actually solve the bug, or just
-   hide it (e.g. swallowing an exception, returning a placeholder, looping to
-   avoid an error)? Set addresses_root_cause=false and explain in `concern`.
-2. Intent preservation — did a rewrite change behaviour unrelated to the bug?
-   Set preserves_intent=false and explain.
-3. Confidence — high if the fix is obviously correct; low if the tool had to
-   guess the user's intent (e.g. what to do on divide-by-zero / empty input).
-Record these in `assessments`.
+Do TWO things.
 
-JOB 2 — Audit the WHOLE final program for LATENT logic bugs:
-Read every function in the final code, including code that was NOT changed. A
-program can run cleanly and still be wrong. Look hard for:
-  * wrong formulas / operators (e.g. interest as `balance * rate` instead of
-    `balance * (1 + rate/100)`; discount as `price - percent` instead of a %),
-  * bad initial values (e.g. `max_val = 0` that breaks for all-negative input),
-  * ignored return values (e.g. calling a function that returns False on failure
-    but proceeding anyway — money/state created incorrectly),
-  * off-by-one and boundary errors (e.g. `> 80` where `>= 80` was meant),
-  * incorrect accumulation, mutation of shared state, or wrong comparison.
-Record each suspected latent bug in `logic_audit` with location, issue, severity.
-It is BETTER to flag a borderline case than to miss a real one — but only flag
-things that are genuinely suspicious, with a concrete reason.
+JOB 1 — Assess each fix (original vs final): set addresses_root_cause (false if it
+masks the bug, e.g. swallowing an error or returning a placeholder),
+preserves_intent (false if it changed unrelated behaviour), and confidence. Record
+in `assessments`.
 
-Finally, `needs_human_review` = the union of fix concerns and logic_audit issues,
-phrased as short action items for a human.
-overall = "solid" (no concerns at all), "acceptable" (only minor/low-severity or
-low-confidence items), or "risky" (a fix masks the bug, breaks intent, or a
-high-severity latent logic bug exists). Return only JSON. No markdown.
+JOB 2 — Run this CHECKLIST over EVERY function in the final code (including
+UNCHANGED code). The checklist is a thinking aid, NOT a quota: most functions are
+fine and produce ZERO concerns. Record a concern ONLY when you can name the
+concrete input and the WRONG result it produces (e.g. "highest([-5,-2]) returns 0,
+but no element is 0"). Do NOT emit open questions ("how does it handle an empty
+list?", "is an empty string valid?") — an axis you merely *thought about* is not a
+finding. If a function is correct, say nothing about it. Set `axis`:
+
+  • return_contract — does it return what callers rely on, on all paths? is a
+    returned success/failure value actually used by the caller, or dropped?
+  • boundary — off-by-one / comparison edges: `>` vs `>=`, `range(len(x))` vs
+    `+1`, inclusive vs exclusive ranges.
+  • init_value — are accumulators / min / max / counters seeded correctly? (e.g. a
+    "maximum" seeded at 0 is wrong for all-negative input.)
+  • invariant — does the function keep an invariant the surrounding code CLEARLY
+    implies (a counter stays in sync, state stays consistent, nothing is created
+    or lost that shouldn't be)? Only if the invariant is evident from the code.
+  • edge_case — empty input, zero, negative, None, single element.
+  • shared_state — mutating a caller's object or a shared/default structure.
+
+These axes are GENERAL programming-correctness checks that apply to ANY program.
+Do NOT assume a domain (bank, shop, game, …) and do NOT invent domain rules.
+
+For each concern set `severity` and `needs_intent` — this decides whether it gets
+AUTO-FIXED, so classify carefully:
+  • needs_intent = FALSE, severity = "high" when the code is demonstrably wrong for
+    some VALID input — there is a clearly-correct fix and no policy choice involved.
+    These WILL be fixed, so be decisive. Examples (all needs_intent=false):
+      – a max/min/selection seeded with a literal that fails for valid input
+        (`best = 0` returns 0 for an all-negative list — a max must be a member);
+      – a function that returns the wrong type, or whose return is dropped by a
+        caller that needed it (success/failure ignored → corrupt state);
+      – an index/loop that goes out of range or skips elements for valid sizes;
+      – an accumulation/initialization that's provably wrong.
+    Phrase `issue` as a STATEMENT of the bug and its fix ("best starts at 0, so an
+    all-negative list returns 0; seed it from the first element") — never a yes/no
+    question like "does it return correctly?".
+  • needs_intent = TRUE only when correctness depends on a POLICY the code does not
+    state — there is no single right answer without the user. Examples:
+      – is a grade boundary inclusive (`>` vs `>=`)?
+      – is an argument a percentage or a multiplier or an absolute amount?
+    Phrase `issue` as a QUESTION; never guess a domain answer.
+When unsure whether something is objective or intent: if you can name the single
+correct fix without assuming a policy, it is OBJECTIVE (needs_intent=false).
+
+`needs_human_review` = short action items (objective bugs + intent questions).
+overall = "solid" (nothing), "acceptable" (only low-severity and/or needs_intent
+items), "risky" (a clear high-severity bug, or a fix that masks the bug). Return
+only JSON. No markdown.
 """
 
 
@@ -106,9 +148,14 @@ class CriticAgent:
     async def _review(self, result: RepairV2Result) -> CritiqueReport:
         schema = json.dumps(CritiqueReport.model_json_schema(), indent=2)
         remaining = f"\nKNOWN UNRESOLVED: {result.remaining_error}" if result.remaining_error else ""
+        already_detected = _deterministic_findings(result)
         prompt = f"""Review this repair for semantic quality only.
 
 REPAIR STATUS: {result.status}{remaining}
+
+ALREADY DETECTED by a static linter (do NOT re-report — focus your reasoning on
+the checklist axes a linter can't decide):
+{already_detected}
 
 ORIGINAL CODE
 {result.original_code}
@@ -119,11 +166,11 @@ FINAL (ACCEPTED) CODE
 RESPONSE JSON SCHEMA
 {schema}
 
-Remember: it already compiles, runs clean, and passed security. (1) Review the
-fixes for root-cause/intent/confidence, AND (2) audit every function in the FINAL
-code for latent logic bugs (wrong formulas, bad initial values, ignored return
-values, off-by-one/boundary errors) — including code that was never changed.
-Return only JSON.
+(1) Assess each fix (root-cause / intent / confidence). (2) Run the per-function
+checklist over EVERY function in the FINAL code (return_contract, boundary,
+init_value, invariant, edge_case, shared_state) — including unchanged code. Use
+needs_intent=true (phrased as a question) when correctness depends on the user's
+intent. Do not assume any domain. Return only JSON.
 """
         response = await self.llm.complete(
             _MODEL,
@@ -137,6 +184,21 @@ Return only JSON.
         if not isinstance(response, CritiqueReport):
             response = CritiqueReport.model_validate(response)
         return response
+
+
+_SEMANTIC_KINDS = {"mutable_default", "ignored_return", "shared_state_alias", "swallowed_exception"}
+
+
+def _deterministic_findings(result: RepairV2Result) -> str:
+    """The semantic-lint warnings already found on the final code — fed to the
+    Critic so it corroborates rather than rediscovers them and spends its
+    reasoning on the axes a linter can't decide."""
+    lines = [
+        f"- {issue.kind} at line {issue.line}: {issue.message}"
+        for issue in result.ledger.issues
+        if issue.kind in _SEMANTIC_KINDS
+    ]
+    return "\n".join(lines) if lines else "(none)"
 
 
 def _fallback(result: RepairV2Result) -> CritiqueReport:

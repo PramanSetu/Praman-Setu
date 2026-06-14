@@ -27,6 +27,8 @@ from pydantic import BaseModel
 
 from backend.agents.critic import CriticAgent, CritiqueReport
 from backend.agents.explainer import ExplainerAgent, RepairExplanation
+from backend.agents.findings import Finding, classify_findings
+from backend.agents.property_tester import PropertyReport, PropertyTesterAgent
 from backend.config import settings
 from backend.input_handler import ProcessedInput, RawInput, smart_input_handler
 from backend.input_handler.detector import UnsupportedLanguageError
@@ -34,6 +36,7 @@ from backend.llm.client import llm_client
 from backend.observability.metrics import build_run_trace
 from backend.orchestrator.graph import build_graph
 from backend.orchestrator.iterative import iterative_fix
+from backend.orchestrator.proof_repair import refine_with_review
 from backend.orchestrator.repair_v2 import RepairV2Result, repair_v2
 from backend.orchestrator.state import PipelineState
 from backend.tools.sandbox.pool import sandbox_pool
@@ -209,30 +212,63 @@ class RepairV2Response(BaseModel):
     result: RepairV2Result
     explanation: RepairExplanation | None = None
     critique: CritiqueReport | None = None
+    property_report: PropertyReport | None = None
+    findings: list[Finding] = []
 
 
 @app.post("/api/repair-v2")
 async def repair_v2_endpoint(
-    payload: RawInput, max_passes: int = 3, explain: bool = True, critique: bool = True
+    payload: RawInput,
+    max_passes: int = 3,
+    explain: bool = True,
+    critique: bool = True,
+    prove: bool = True,
 ) -> RepairV2Response:
     """Primary pasted-file repair path: bug ledger -> AST unit splice -> full-file validation.
 
-    With ``explain=true`` (default) a human-readable narrative is attached.
-    With ``critique=true`` (default) a semantic review (root-cause / intent /
-    confidence) is attached, whose ``needs_human_review`` is the authoritative
-    flag list.
+    Post-repair, three independent reviewers run concurrently: the Explainer
+    (narrative), the Critic (semantic checklist), and the Property Tester, which
+    runs generated property tests to turn suspected logic bugs into proven ones
+    (only on a clean result).
     """
     try:
         result = await repair_v2(payload.code, payload.filename, max_passes=max_passes)
     except UnsupportedLanguageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Explainer and Critic are independent — run them concurrently (one round-trip).
     exp_task = asyncio.ensure_future(ExplainerAgent(llm_client).explain(result)) if explain else None
     crit_task = asyncio.ensure_future(CriticAgent(llm_client).review(result)) if critique else None
+    prove_task = (
+        asyncio.ensure_future(PropertyTesterAgent(llm_client).probe(result.final_code))
+        if prove and result.status == "clean"
+        else None
+    )
     explanation = await exp_task if exp_task is not None else None
     critique_report = await crit_task if crit_task is not None else None
-    return RepairV2Response(result=result, explanation=explanation, critique=critique_report)
+    property_report = await prove_task if prove_task is not None else None
+
+    # Review-driven repair: let the Critic + Property Tester FIX their objective
+    # findings (not just flag them), re-validated so it never regresses.
+    if result.status == "clean":
+        fixed_code, property_report, critique_report, fixed_ledger = await refine_with_review(
+            result.original_code,
+            result.final_code,
+            result.ledger,
+            property_report=property_report,
+            critique=critique_report,
+            critic=CriticAgent(llm_client),
+        )
+        # Re-anchor BOTH code and ledger so findings are classified against the
+        # final state — bugs the refine pass fixed must not linger as stale findings.
+        result = result.model_copy(update={"final_code": fixed_code, "ledger": fixed_ledger})
+
+    return RepairV2Response(
+        result=result,
+        explanation=explanation,
+        critique=critique_report,
+        property_report=property_report,
+        findings=classify_findings(result, critique_report, property_report),
+    )
 
 
 @app.post("/api/repair-v2/stream")
@@ -241,6 +277,7 @@ async def repair_v2_stream_endpoint(
     max_passes: int = 3,
     explain: bool = True,
     critique: bool = True,
+    prove: bool = True,
 ) -> StreamingResponse:
     """Stream the primary repair path as Server-Sent Events.
 
@@ -254,6 +291,7 @@ async def repair_v2_stream_endpoint(
             max_passes=max(1, min(max_passes, 5)),
             explain=explain,
             critique=critique,
+            prove=prove,
         ),
         media_type="text/event-stream",
         headers={
@@ -316,6 +354,7 @@ async def _repair_v2_sse_stream(
     max_passes: int,
     explain: bool,
     critique: bool,
+    prove: bool = True,
 ) -> AsyncGenerator[str, None]:
     queue: asyncio.Queue[tuple[str | None, dict[str, Any] | None]] = asyncio.Queue()
 
@@ -333,8 +372,14 @@ async def _repair_v2_sse_stream(
 
             explanation: RepairExplanation | None = None
             critique_report: CritiqueReport | None = None
+            property_report: PropertyReport | None = None
             exp_task = asyncio.ensure_future(ExplainerAgent(llm_client).explain(result)) if explain else None
             crit_task = asyncio.ensure_future(CriticAgent(llm_client).review(result)) if critique else None
+            prove_task = (
+                asyncio.ensure_future(PropertyTesterAgent(llm_client).probe(result.final_code))
+                if prove and result.status == "clean"
+                else None
+            )
 
             tasks: set[asyncio.Task] = set()
             task_names: dict[asyncio.Task, str] = {}
@@ -346,6 +391,10 @@ async def _repair_v2_sse_stream(
                 tasks.add(crit_task)
                 task_names[crit_task] = "critique"
                 await publish("phase", {"stage": "Critic Agent", "status": "running"})
+            if prove_task is not None:
+                tasks.add(prove_task)
+                task_names[prove_task] = "property"
+                await publish("phase", {"stage": "Property Tester", "status": "running"})
 
             while tasks:
                 done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -354,16 +403,54 @@ async def _repair_v2_sse_stream(
                     if name == "explanation":
                         explanation = task.result()
                         await publish("explanation", {"explanation": explanation.model_dump(mode="json")})
-                    else:
+                    elif name == "critique":
                         critique_report = task.result()
                         await publish("critique", {"critique": critique_report.model_dump(mode="json")})
+                    else:
+                        property_report = task.result()
+                        await publish("property", {"property": property_report.model_dump(mode="json")})
 
+            # Review-driven repair: the Critic + Property Tester FIX their objective
+            # findings, re-validated so it never regresses.
+            if result.status == "clean":
+                await publish("phase", {"stage": "Critic Agent", "status": "fixing objective bugs"})
+                fixed_code, property_report, critique_report, fixed_ledger = await refine_with_review(
+                    result.original_code,
+                    result.final_code,
+                    result.ledger,
+                    property_report=property_report,
+                    critique=critique_report,
+                    critic=CriticAgent(llm_client),
+                )
+                code_changed = fixed_code != result.final_code
+                # Re-anchor code + ledger to the final state so findings never show
+                # a bug the refine pass already fixed.
+                result = result.model_copy(update={"final_code": fixed_code, "ledger": fixed_ledger})
+                if code_changed:
+                    await publish(
+                        "patch",
+                        {
+                            "stage": "Critic Agent",
+                            "pass_number": 0,
+                            "applied_edits": 1,
+                            "edit_failures": [],
+                            "code": result.final_code,
+                        },
+                    )
+                if property_report is not None:
+                    await publish("property", {"property": property_report.model_dump(mode="json")})
+                if critique_report is not None:
+                    await publish("critique", {"critique": critique_report.model_dump(mode="json")})
+
+            findings = classify_findings(result, critique_report, property_report)
             await publish(
                 "done",
                 {
                     "result": result.model_dump(mode="json"),
                     "explanation": explanation.model_dump(mode="json") if explanation else None,
                     "critique": critique_report.model_dump(mode="json") if critique_report else None,
+                    "property": property_report.model_dump(mode="json") if property_report else None,
+                    "findings": [f.model_dump(mode="json") for f in findings],
                 },
             )
         except UnsupportedLanguageError as exc:

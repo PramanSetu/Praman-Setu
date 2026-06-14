@@ -21,6 +21,12 @@ IssueKind = Literal[
     "undefined_name_hint",
     "top_level_input",
     "top_level_execution",
+    "mutable_default",
+    "ignored_return",
+    "shared_state_alias",
+    "swallowed_exception",
+    "infinite_loop",
+    "background_thread",
 ]
 
 
@@ -144,6 +150,13 @@ def build_bug_ledger(code: str, processed: ProcessedInput | None = None) -> BugL
         )
 
     issues.extend(_undefined_name_hints(tree))
+
+    # Deterministic semantic linters — non-crashing logic anti-patterns the
+    # "runs clean" oracle misses. Local import avoids a circular dependency
+    # (semantic_lint imports LedgerIssue from this module).
+    from backend.tools.semantic_lint import semantic_lint
+
+    issues.extend(semantic_lint(tree))
 
     return BugLedger(
         code_compiles=True,
