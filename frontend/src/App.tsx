@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Editor, { DiffEditor, type Monaco } from "@monaco-editor/react";
 import "./App.css";
 
-const API = "http://localhost:8000";
+const API = "http://localhost:8001";
 
 const MONACO_BASE_OPTIONS = {
   fontSize: 13,
@@ -382,7 +382,7 @@ export function App() {
       <header className="topbar">
         <div className="brand-row">
           <button className="primary-button" disabled={isRunning || !code.trim()} onClick={repair}>
-            {isRunning ? "Repairing…" : "Repair"}
+            {isRunning ? "working" : "Start"}
           </button>
           <span className="divider" />
           <strong className="brand">Praman Setu</strong>

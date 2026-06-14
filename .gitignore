@@ -20,6 +20,18 @@ npm-debug.log*
 # --- Docker / data ---
 # (named volumes are managed by Docker, not tracked here)
 
+# --- Runtime / generated data ---
+pipeline_checkpoints.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Office temp / lock files ---
+~$*
+*.tmp
+
 # --- Editor / OS ---
 .vscode/
 .idea/
