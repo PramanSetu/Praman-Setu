@@ -150,3 +150,30 @@ async def test_repair_v2_applies_exact_edits_and_validates_clean() -> None:
     assert result.final_code == FIXED
     assert result.attempts[0].applied_edits == 1
     assert result.ledger.code_compiles is True
+
+
+async def test_repair_v2_emits_streamable_repair_events() -> None:
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    result = await repair_v2(
+        BUGGY,
+        "main.py",
+        handler=Handler(),
+        fixer=Fixer(),
+        security_scan=_secure,
+        test_runner=_tests_pass,
+        on_event=collect,
+    )
+
+    event_types = [event_type for event_type, _ in events]
+    patch_events = [payload for event_type, payload in events if event_type == "patch"]
+
+    assert result.status == "clean"
+    assert "input" in event_types
+    assert "ledger" in event_types
+    assert "repair" in event_types
+    assert "validation" in event_types
+    assert patch_events[0]["code"] == FIXED

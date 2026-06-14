@@ -14,6 +14,7 @@ Per-request:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -104,7 +105,10 @@ app = FastAPI(title="Praman Setu", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],  # Vite dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -231,6 +235,34 @@ async def repair_v2_endpoint(
     return RepairV2Response(result=result, explanation=explanation, critique=critique_report)
 
 
+@app.post("/api/repair-v2/stream")
+async def repair_v2_stream_endpoint(
+    payload: RawInput,
+    max_passes: int = 3,
+    explain: bool = True,
+    critique: bool = True,
+) -> StreamingResponse:
+    """Stream the primary repair path as Server-Sent Events.
+
+    This is the UI-friendly endpoint for live repair progress. The repair agent
+    still returns structured JSON after each LLM call, so this streams pipeline
+    milestones and code snapshots rather than raw model tokens.
+    """
+    return StreamingResponse(
+        _repair_v2_sse_stream(
+            payload,
+            max_passes=max(1, min(max_passes, 5)),
+            explain=explain,
+            critique=critique,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/fix")
 async def fix(
     payload: RawInput,
@@ -276,6 +308,85 @@ async def fix(
         )
     except UnsupportedLanguageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _repair_v2_sse_stream(
+    payload: RawInput,
+    *,
+    max_passes: int,
+    explain: bool,
+    critique: bool,
+) -> AsyncGenerator[str, None]:
+    queue: asyncio.Queue[tuple[str | None, dict[str, Any] | None]] = asyncio.Queue()
+
+    async def publish(event_type: str, data: dict[str, Any]) -> None:
+        await queue.put((event_type, data))
+
+    async def run() -> None:
+        try:
+            result = await repair_v2(
+                payload.code,
+                payload.filename,
+                max_passes=max_passes,
+                on_event=publish,
+            )
+
+            explanation: RepairExplanation | None = None
+            critique_report: CritiqueReport | None = None
+            exp_task = asyncio.ensure_future(ExplainerAgent(llm_client).explain(result)) if explain else None
+            crit_task = asyncio.ensure_future(CriticAgent(llm_client).review(result)) if critique else None
+
+            tasks: set[asyncio.Task] = set()
+            task_names: dict[asyncio.Task, str] = {}
+            if exp_task is not None:
+                tasks.add(exp_task)
+                task_names[exp_task] = "explanation"
+                await publish("phase", {"stage": "Explainer Agent", "status": "running"})
+            if crit_task is not None:
+                tasks.add(crit_task)
+                task_names[crit_task] = "critique"
+                await publish("phase", {"stage": "Critic Agent", "status": "running"})
+
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    name = task_names[task]
+                    if name == "explanation":
+                        explanation = task.result()
+                        await publish("explanation", {"explanation": explanation.model_dump(mode="json")})
+                    else:
+                        critique_report = task.result()
+                        await publish("critique", {"critique": critique_report.model_dump(mode="json")})
+
+            await publish(
+                "done",
+                {
+                    "result": result.model_dump(mode="json"),
+                    "explanation": explanation.model_dump(mode="json") if explanation else None,
+                    "critique": critique_report.model_dump(mode="json") if critique_report else None,
+                },
+            )
+        except UnsupportedLanguageError as exc:
+            await publish("error", {"message": str(exc), "status_code": 400})
+        except Exception as exc:  # noqa: BLE001
+            await publish("error", {"message": str(exc), "status_code": 500})
+        finally:
+            await queue.put((None, None))
+
+    task = asyncio.create_task(run())
+    try:
+        while True:
+            event_type, data = await queue.get()
+            if event_type is None:
+                break
+            yield _sse_event(event_type, data or {})
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+def _sse_event(event_type: str, data: dict[str, Any]) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 async def _fix_sse_stream(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Awaitable, Callable
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,7 @@ class Fixer(Protocol):
 
 SecurityScan = Callable[[str], Awaitable[list[str]]]
 TestRunner = Callable[[str, str], Awaitable[SandboxResult]]
+RepairEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class RepairAttempt(BaseModel):
@@ -90,6 +91,7 @@ async def repair_v2(
     fixer: Fixer | None = None,
     security_scan: SecurityScan | None = None,
     test_runner: TestRunner | None = None,
+    on_event: RepairEventCallback | None = None,
 ) -> RepairV2Result:
     agent = fixer or MultiIssueFixerAgent(llm_client)
     scan = security_scan or _security_scan
@@ -101,10 +103,59 @@ async def repair_v2(
     latest_ledger: BugLedger | None = None
 
     for pass_number in range(1, max_passes + 1):
+        await _emit(
+            on_event,
+            "phase",
+            {
+                "stage": "Smart Input Handler",
+                "pass_number": pass_number,
+                "status": "running",
+            },
+        )
         latest_processed = await handler.handle(RawInput(code=current, filename=filename))
+        await _emit(
+            on_event,
+            "input",
+            {
+                "stage": "Smart Input Handler",
+                "pass_number": pass_number,
+                "status": latest_processed.status,
+                "error_type": latest_processed.error_type,
+                "error_line": latest_processed.error_line,
+                "error_message": latest_processed.error_message,
+            },
+        )
+
+        await _emit(
+            on_event,
+            "phase",
+            {
+                "stage": "Bug Ledger",
+                "pass_number": pass_number,
+                "status": "running",
+            },
+        )
         latest_ledger = build_bug_ledger(current, latest_processed)
+        await _emit(
+            on_event,
+            "ledger",
+            {
+                "stage": "Bug Ledger",
+                "pass_number": pass_number,
+                "ledger": latest_ledger.model_dump(),
+            },
+        )
 
         if latest_processed.status == "execution_clean":
+            await _emit(
+                on_event,
+                "phase",
+                {
+                    "stage": "Validator",
+                    "pass_number": pass_number,
+                    "status": "security_scan",
+                },
+            )
             security = await scan(current)
             if not security:
                 return _result("clean", pass_number - 1, code, current, latest_ledger, attempts)
@@ -119,6 +170,15 @@ async def repair_v2(
             )
 
         try:
+            await _emit(
+                on_event,
+                "phase",
+                {
+                    "stage": "Repair Agent",
+                    "pass_number": pass_number,
+                    "status": "running",
+                },
+            )
             response = await agent.fix(current, latest_ledger, validation_feedback=feedback)
         except Exception as exc:  # noqa: BLE001
             # Both Groq and the Ollama fallback are unreachable/exhausted. Don't
@@ -132,12 +192,55 @@ async def repair_v2(
                 attempts,
                 remaining=f"repair agent unavailable: {exc}",
             )
+        await _emit(
+            on_event,
+            "repair",
+            {
+                "stage": "Repair Agent",
+                "pass_number": pass_number,
+                "summary": response.summary,
+                "issues_found": response.issues_found,
+                "confidence": response.confidence,
+                "units": [unit.model_dump() for unit in response.units],
+                "generated_tests_present": bool(response.generated_tests.strip()),
+            },
+        )
+        await _emit(
+            on_event,
+            "phase",
+            {
+                "stage": "Patch Applier",
+                "pass_number": pass_number,
+                "status": "running",
+            },
+        )
         apply_result = apply_unit_rewrites(current, response.units)
         validation_errors: list[str] = list(apply_result.failures)
+        await _emit(
+            on_event,
+            "patch",
+            {
+                "stage": "Patch Applier",
+                "pass_number": pass_number,
+                "applied_edits": apply_result.applied_count,
+                "edit_failures": apply_result.failures,
+                "code": apply_result.applied_code,
+            },
+        )
 
         if apply_result.applied_code.strip() == current.strip():
-            attempts.append(
-                _attempt(pass_number, response, apply_result, validation_errors or ["no code change produced"])
+            attempt = _attempt(
+                pass_number, response, apply_result, validation_errors or ["no code change produced"]
+            )
+            attempts.append(attempt)
+            await _emit(
+                on_event,
+                "attempt",
+                {
+                    "stage": "Patch Applier",
+                    "pass_number": pass_number,
+                    "attempt": attempt.model_dump(),
+                },
             )
             # The agent DID propose edits but none matched the current source
             # (the brittle-`old` case). Don't give up — tell it exactly which
@@ -163,6 +266,15 @@ async def repair_v2(
                 remaining="no code change produced",
             )
 
+        await _emit(
+            on_event,
+            "phase",
+            {
+                "stage": "Validator",
+                "pass_number": pass_number,
+                "status": "running",
+            },
+        )
         validation_errors.extend(
             await _validate_candidate(
                 apply_result.applied_code,
@@ -173,7 +285,27 @@ async def repair_v2(
                 response.generated_tests,
             )
         )
-        attempts.append(_attempt(pass_number, response, apply_result, validation_errors))
+        await _emit(
+            on_event,
+            "validation",
+            {
+                "stage": "Validator",
+                "pass_number": pass_number,
+                "passed": not validation_errors,
+                "validation_errors": validation_errors,
+            },
+        )
+        attempt = _attempt(pass_number, response, apply_result, validation_errors)
+        attempts.append(attempt)
+        await _emit(
+            on_event,
+            "attempt",
+            {
+                "stage": "Validator",
+                "pass_number": pass_number,
+                "attempt": attempt.model_dump(),
+            },
+        )
 
         current = apply_result.applied_code
         if not validation_errors:
@@ -199,6 +331,15 @@ async def repair_v2(
         attempts,
         remaining=final_processed.error_message or final_processed.error_type,
     )
+
+
+async def _emit(
+    on_event: RepairEventCallback | None,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    if on_event is not None:
+        await on_event(event_type, payload)
 
 
 async def _validate_candidate(

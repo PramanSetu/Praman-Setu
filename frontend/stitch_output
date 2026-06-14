@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Praman Setu | Repair Workspace</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        body {
+            background-color: #031427;
+            color: #d3e4fe;
+            overflow: hidden;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #102034;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #434655;
+        }
+        .line-numbers {
+            user-select: none;
+            text-align: right;
+            padding-right: 12px;
+            color: #434655;
+        }
+        .code-diff-add {
+            background-color: rgba(34, 197, 94, 0.1);
+            border-left: 2px solid #22c55e;
+        }
+        .code-diff-remove {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-left: 2px solid #ef4444;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "primary-container": "#2563eb",
+                      "error-container": "#93000a",
+                      "surface-bright": "#2a3a4f",
+                      "on-primary-fixed-variant": "#003ea8",
+                      "on-tertiary-fixed": "#360f00",
+                      "surface-container-low": "#0b1c30",
+                      "on-secondary-fixed-variant": "#3f465c",
+                      "on-tertiary-container": "#ffede6",
+                      "inverse-primary": "#0053db",
+                      "surface-container-highest": "#26364a",
+                      "tertiary-container": "#bc4800",
+                      "surface-variant": "#26364a",
+                      "surface-tint": "#b4c5ff",
+                      "secondary": "#bec6e0",
+                      "surface": "#031427",
+                      "on-error": "#690005",
+                      "on-surface-variant": "#c3c6d7",
+                      "surface-container": "#102034",
+                      "primary": "#b4c5ff",
+                      "secondary-container": "#3f465c",
+                      "tertiary-fixed": "#ffdbcd",
+                      "primary-fixed-dim": "#b4c5ff",
+                      "surface-dim": "#031427",
+                      "on-secondary-container": "#adb4ce",
+                      "inverse-on-surface": "#213145",
+                      "background": "#031427",
+                      "on-secondary": "#283044",
+                      "secondary-fixed-dim": "#bec6e0",
+                      "on-background": "#d3e4fe",
+                      "surface-container-high": "#1b2b3f",
+                      "on-tertiary": "#581e00",
+                      "on-secondary-fixed": "#131b2e",
+                      "on-surface": "#d3e4fe",
+                      "outline-variant": "#434655",
+                      "outline": "#8d90a0",
+                      "inverse-surface": "#d3e4fe",
+                      "on-tertiary-fixed-variant": "#7d2d00",
+                      "on-primary": "#002a78",
+                      "surface-container-lowest": "#000f21",
+                      "on-error-container": "#ffdad6",
+                      "tertiary": "#ffb596",
+                      "primary-fixed": "#dbe1ff",
+                      "tertiary-fixed-dim": "#ffb596",
+                      "error": "#ffb4ab",
+                      "on-primary-fixed": "#00174b",
+                      "secondary-fixed": "#dae2fd",
+                      "on-primary-container": "#eeefff"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.125rem",
+                      "lg": "0.25rem",
+                      "xl": "0.5rem",
+                      "full": "0.75rem"
+              },
+              "spacing": {
+                      "container-padding": "12px",
+                      "element-gap": "8px",
+                      "inline-gap": "4px",
+                      "panel-gap": "1px",
+                      "sidebar-width": "260px",
+                      "toolbar-height": "40px"
+              },
+              "fontFamily": {
+                      "body-md": ["Inter"],
+                      "display-sm": ["Inter"],
+                      "label-xs": ["JetBrains Mono"],
+                      "body-sm": ["Inter"],
+                      "code-sm": ["JetBrains Mono"],
+                      "headline-sm": ["Inter"],
+                      "code-md": ["JetBrains Mono"]
+              },
+              "fontSize": {
+                      "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                      "display-sm": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                      "label-xs": ["10px", {"lineHeight": "12px", "letterSpacing": "0.05em", "fontWeight": "500"}],
+                      "body-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                      "code-sm": ["11px", {"lineHeight": "16px", "fontWeight": "400"}],
+                      "headline-sm": ["18px", {"lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                      "code-md": ["13px", {"lineHeight": "20px", "fontWeight": "400"}]
+              }
+            },
+          },
+        }
+      </script>
+</head>
+<body class="flex flex-col h-screen w-full font-body-md text-body-md">
+<!-- TopNavBar -->
+<header class="flex justify-between items-center h-toolbar-height px-container-padding w-full z-50 bg-surface-container border-b border-outline-variant">
+<div class="flex items-center gap-element-gap">
+<span class="font-headline-sm text-headline-sm font-bold text-on-surface">Praman Setu</span>
+<div class="h-4 w-px bg-outline-variant mx-2"></div>
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+<span class="font-label-xs text-label-xs text-on-surface-variant uppercase tracking-wider">Backend: Online</span>
+</div>
+</div>
+<nav class="hidden md:flex items-center gap-6 h-full">
+<a class="text-primary font-bold border-b-2 border-primary h-full flex items-center px-2" href="#">Explorer</a>
+<a class="text-on-surface-variant hover:bg-surface-variant px-2 h-full flex items-center transition-colors" href="#">Debugger</a>
+<a class="text-on-surface-variant hover:bg-surface-variant px-2 h-full flex items-center transition-colors" href="#">Pipeline</a>
+<a class="text-on-surface-variant hover:bg-surface-variant px-2 h-full flex items-center transition-colors" href="#">History</a>
+</nav>
+<div class="flex items-center gap-element-gap">
+<button class="material-symbols-outlined text-on-surface-variant p-1 hover:bg-surface-variant transition-colors" data-icon="help_outline">help_outline</button>
+<button class="material-symbols-outlined text-on-surface-variant p-1 hover:bg-surface-variant transition-colors" data-icon="settings">settings</button>
+<button class="bg-primary-container text-on-primary-container px-3 py-1 font-medium hover:opacity-90 transition-all">Repair</button>
+</div>
+</header>
+<!-- Main Workspace -->
+<main class="flex-1 flex flex-col min-h-0 bg-surface">
+<!-- Pipeline Strip -->
+<section class="h-10 bg-surface-container-low border-b border-outline-variant flex items-center px-container-padding overflow-x-auto no-scrollbar">
+<div class="flex items-center gap-2 whitespace-nowrap">
+<div class="flex items-center gap-1 opacity-60">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-green-500 text-surface">1</span>
+<span class="font-label-xs text-label-xs">Smart Input Handler</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-green-500 text-surface">2</span>
+<span class="font-label-xs text-label-xs">Bug Ledger</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-green-500 text-surface">3</span>
+<span class="font-label-xs text-label-xs">Repair Agent</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-green-500 text-surface">4</span>
+<span class="font-label-xs text-label-xs">Patch Applier</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-green-500 text-surface">5</span>
+<span class="font-label-xs text-label-xs">Validator</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px] bg-primary text-surface">6</span>
+<span class="font-label-xs text-label-xs text-primary">Explainer Agent</span>
+</div>
+<span class="material-symbols-outlined text-outline-variant text-sm">chevron_right</span>
+<div class="flex items-center gap-1 opacity-40">
+<span class="w-4 h-4 rounded-full border border-outline flex items-center justify-center text-[10px]">7</span>
+<span class="font-label-xs text-label-xs">Critic Agent</span>
+</div>
+</div>
+</section>
+<!-- Editor & Results Grid -->
+<div class="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-panel-gap min-h-0">
+<!-- Left Panel: Input Editor -->
+<section class="flex flex-col bg-surface-container-lowest border-r border-outline-variant min-h-0">
+<div class="flex flex-col p-container-padding gap-3 bg-surface-container-low">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-sm text-outline">description</span>
+<input class="bg-transparent border-none focus:ring-0 text-body-sm font-code-sm p-0 w-full text-on-surface" placeholder="Filename..." type="text" value="app.py"/>
+</div>
+<textarea class="bg-surface-container border border-outline-variant text-code-sm font-code-sm p-2 h-20 focus:border-primary outline-none custom-scrollbar" placeholder="Paste Error Traceback (Optional)..."></textarea>
+</div>
+<div class="flex-1 overflow-auto custom-scrollbar bg-surface relative flex">
+<div class="line-numbers font-code-sm text-code-sm py-4 bg-surface-container-lowest border-r border-outline-variant min-w-[40px]">
+                        1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8<br/>9<br/>10<br/>11<br/>12<br/>13<br/>14<br/>15
+                    </div>
+<pre class="flex-1 p-4 font-code-sm text-code-sm text-on-surface whitespace-pre"><code><span class="text-pink-400">def</span> <span class="text-yellow-200">calculate_factorial</span>(n):
+    <span class="text-gray-500"># Buggy implementation prone to recursion depth error</span>
+    <span class="text-pink-400">if</span> n == <span class="text-orange-300">0</span>:
+        <span class="text-pink-400">return</span> <span class="text-orange-300">1</span>
+    <span class="text-pink-400">return</span> n * calculate_factorial(n)
+
+<span class="text-pink-400">if</span> __name__ == <span class="text-green-300">"__main__"</span>:
+    print(calculate_factorial(<span class="text-orange-300">5</span>))</code></pre>
+</div>
+<!-- Footer Controls -->
+<div class="p-container-padding bg-surface-container-low border-t border-outline-variant flex flex-wrap items-center justify-between gap-3">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant">Max Passes</span>
+<select class="bg-surface-container border border-outline-variant text-body-sm py-1 pl-2 pr-8 focus:ring-0 focus:border-primary">
+<option>1</option>
+<option>2</option>
+<option selected="">3</option>
+<option>4</option>
+<option>5</option>
+</select>
+</div>
+<label class="flex items-center gap-2 cursor-pointer group">
+<input checked="" class="w-3 h-3 rounded-none bg-surface-container border-outline-variant text-primary focus:ring-0" type="checkbox"/>
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant group-hover:text-on-surface">Explain</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer group">
+<input class="w-3 h-3 rounded-none bg-surface-container border-outline-variant text-primary focus:ring-0" type="checkbox"/>
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant group-hover:text-on-surface">Critique</span>
+</label>
+</div>
+<button class="bg-primary text-on-primary px-4 py-1.5 font-medium hover:opacity-90 active:scale-95 transition-all text-body-sm">
+                        Repair Code
+                    </button>
+</div>
+</section>
+<!-- Right Panel: Results -->
+<section class="flex flex-col bg-surface min-h-0">
+<!-- Post-Run Header -->
+<div class="p-container-padding border-b border-outline-variant bg-surface-container-high">
+<div class="flex items-center gap-3 mb-2">
+<span class="px-2 py-0.5 bg-green-500/10 border border-green-500 text-green-500 font-label-xs text-label-xs uppercase">Clean</span>
+<span class="text-on-surface-variant font-label-xs text-label-xs">REPAIR ID: PR-9402</span>
+</div>
+<h2 class="font-headline-sm text-headline-sm text-on-surface">Successfully fixed recursion depth error in app.py</h2>
+</div>
+<!-- Tabs -->
+<div class="flex bg-surface-container-low border-b border-outline-variant overflow-x-auto no-scrollbar">
+<button class="px-4 h-10 flex items-center font-label-xs text-label-xs uppercase border-t-2 border-primary bg-surface-container-high text-primary">Diff</button>
+<button class="px-4 h-10 flex items-center font-label-xs text-label-xs uppercase border-t-2 border-transparent text-on-surface-variant hover:bg-surface-variant">Final Code</button>
+<button class="px-4 h-10 flex items-center font-label-xs text-label-xs uppercase border-t-2 border-transparent text-on-surface-variant hover:bg-surface-variant">Issues <span class="ml-1 text-[10px] bg-error-container text-on-error-container px-1 rounded-full">1</span></button>
+<button class="px-4 h-10 flex items-center font-label-xs text-label-xs uppercase border-t-2 border-transparent text-on-surface-variant hover:bg-surface-variant">Attempts</button>
+<button class="px-4 h-10 flex items-center font-label-xs text-label-xs uppercase border-t-2 border-transparent text-on-surface-variant hover:bg-surface-variant">Human Review</button>
+</div>
+<!-- Tab Content: Diff -->
+<div class="flex-1 overflow-auto custom-scrollbar bg-surface-container-lowest">
+<div class="font-code-sm text-code-sm text-on-surface leading-loose">
+<div class="flex border-b border-outline-variant opacity-40">
+<span class="w-10 line-numbers py-1">2</span>
+<span class="flex-1 px-4 py-1">    # Buggy implementation prone to recursion depth error</span>
+</div>
+<div class="flex border-b border-outline-variant opacity-40">
+<span class="w-10 line-numbers py-1">3</span>
+<span class="flex-1 px-4 py-1">    if n == 0:</span>
+</div>
+<div class="flex border-b border-outline-variant opacity-40">
+<span class="w-10 line-numbers py-1">4</span>
+<span class="flex-1 px-4 py-1">        return 1</span>
+</div>
+<div class="flex code-diff-remove border-b border-outline-variant">
+<span class="w-10 line-numbers py-1 text-error">5</span>
+<span class="flex-1 px-4 py-1 text-error">-    return n * calculate_factorial(n)</span>
+</div>
+<div class="flex code-diff-add border-b border-outline-variant">
+<span class="w-10 line-numbers py-1 text-green-500">5</span>
+<span class="flex-1 px-4 py-1 text-green-500">+    return n * calculate_factorial(n - 1)</span>
+</div>
+<div class="flex border-b border-outline-variant opacity-40">
+<span class="w-10 line-numbers py-1">6</span>
+<span class="flex-1 px-4 py-1"></span>
+</div>
+<div class="flex border-b border-outline-variant opacity-40">
+<span class="w-10 line-numbers py-1">7</span>
+<span class="flex-1 px-4 py-1">if __name__ == "__main__":</span>
+</div>
+</div>
+<!-- Issues Preview (Quick Glance) -->
+<div class="mt-8 px-container-padding">
+<div class="flex items-center gap-2 mb-4">
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant">Bug Ledger Findings</span>
+<div class="flex-1 h-px bg-outline-variant"></div>
+</div>
+<div class="space-y-panel-gap mb-8">
+<div class="p-3 bg-surface-container-high border border-outline-variant flex gap-4">
+<div class="material-symbols-outlined text-error" data-icon="error_outline">error_outline</div>
+<div class="flex-1">
+<div class="flex justify-between items-start mb-1">
+<span class="font-code-md text-code-md font-bold">Infinite Recursion</span>
+<span class="font-label-xs text-label-xs text-on-surface-variant">Line 5 • Severity: High</span>
+</div>
+<p class="text-body-sm text-on-surface-variant">Function `calculate_factorial` calls itself with the same input `n`, leading to a RecursionError.</p>
+</div>
+</div>
+</div>
+</div>
+<!-- Human Review Snippet -->
+<div class="px-container-padding pb-8">
+<div class="flex items-center gap-2 mb-4">
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant">Critic Agent Audit</span>
+<div class="flex-1 h-px bg-outline-variant"></div>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+<div class="p-3 bg-surface-container-high border border-outline-variant rounded">
+<span class="block font-label-xs text-label-xs uppercase mb-1 opacity-60">Audit Score</span>
+<span class="text-display-sm font-display-sm text-primary">9.8/10</span>
+</div>
+<div class="p-3 bg-surface-container-high border border-outline-variant rounded col-span-2">
+<span class="block font-label-xs text-label-xs uppercase mb-1 opacity-60">Logic Audit</span>
+<p class="text-body-sm text-on-surface-variant italic">"The patch correctly implements the recursive step n-1. Suggestion: Consider iterative approach for larger inputs to avoid stack overflow."</p>
+</div>
+</div>
+</div>
+</div>
+<!-- Pass-by-pass attempts footer -->
+<div class="h-10 bg-surface-container-low border-t border-outline-variant flex items-center px-container-padding gap-6">
+<span class="font-label-xs text-label-xs uppercase text-on-surface-variant">Attempts</span>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-1.5">
+<div class="w-2 h-2 rounded-full bg-green-500"></div>
+<span class="text-body-sm font-code-sm">Pass 1: 94% conf.</span>
+</div>
+<div class="flex items-center gap-1.5 opacity-40">
+<div class="w-2 h-2 rounded-full bg-outline"></div>
+<span class="text-body-sm font-code-sm">Pass 2</span>
+</div>
+</div>
+</div>
+</section>
+</div>
+</main>
+<!-- SideNavBar (Mobile Drawer Placeholder / Desktop Mini) -->
+<aside class="hidden fixed left-0 top-toolbar-height h-[calc(100vh-40px)] w-sidebar-width bg-surface-container-low border-r border-outline-variant flex flex-col z-40 transition-transform -translate-x-full lg:translate-x-0">
+<div class="p-container-padding border-b border-outline-variant mb-2">
+<h3 class="font-headline-sm text-headline-sm text-primary">Active Projects</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Debugging Python Services</p>
+</div>
+<nav class="flex-1 p-2 space-y-1">
+<div class="bg-secondary-container text-on-secondary-container border-l-2 border-primary flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="folder">folder</span>
+<span class="font-body-sm text-body-sm flex-1">src/api/app.py</span>
+</div>
+<div class="text-on-surface-variant hover:bg-surface-variant flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="bug_report">bug_report</span>
+<span class="font-body-sm text-body-sm flex-1">Bug Ledger (1)</span>
+</div>
+<div class="text-on-surface-variant hover:bg-surface-variant flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="account_tree">account_tree</span>
+<span class="font-body-sm text-body-sm flex-1">Pipeline Visualizer</span>
+</div>
+<div class="text-on-surface-variant hover:bg-surface-variant flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="history">history</span>
+<span class="font-body-sm text-body-sm flex-1">Repair History</span>
+</div>
+</nav>
+<div class="p-2 border-t border-outline-variant flex flex-col gap-1">
+<div class="text-on-surface-variant hover:bg-surface-variant flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="description">description</span>
+<span class="font-body-sm text-body-sm">Documentation</span>
+</div>
+<div class="text-on-surface-variant hover:bg-surface-variant flex items-center gap-3 p-2 cursor-pointer transition-colors">
+<span class="material-symbols-outlined text-md" data-icon="settings">settings</span>
+<span class="font-body-sm text-body-sm">Engine Settings</span>
+</div>
+<div class="mt-4 flex items-center gap-3 p-2">
+<img alt="User Profile" class="w-8 h-8 rounded-full border border-outline-variant" data-alt="A professional headshot of a software engineer in a minimal, dark-themed office setting. The lighting is cold with blue accents reflecting the dark-mode IDE aesthetic of the application." src="https://lh3.googleusercontent.com/aida-public/AB6AXuA6le0Erm0M7byGC_eQuvw2NRCYv3_3LET28Y_dJKMuVC4x7WeP253mWS-_K9euYtleaLIyZAD23rROl8LIh443cgG2iIDl0b1G-pIspvi1SvdXxafZaBNImvcLekjOHbpKPczqRKbO6MDjMhwfYt2vYLUMiNKVr4S0DokC-eI_suuXBkcvUxa8tdyCRPV8-sNxWNfkRD8jcap-oe-HNWYV9udxeYg6nW_3gdPKI_Nj6thrPvECC9tSX6uDHG2T9d343Qh2dlSeG8Q"/>
+<div class="flex-1 overflow-hidden">
+<p class="font-body-sm text-body-sm font-bold truncate">Expert Developer</p>
+<p class="text-[10px] text-on-surface-variant truncate">Premium Access</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- Success Feedback Overlay (Micro-interaction) -->
+<div class="fixed bottom-6 right-6 z-[60] bg-surface-container border border-green-500/50 p-4 shadow-2xl transform translate-y-20 transition-transform duration-500" id="repair-success">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 bg-green-500 text-surface flex items-center justify-center rounded-full">
+<span class="material-symbols-outlined" data-icon="check">check</span>
+</div>
+<div>
+<p class="font-bold text-on-surface">Repair Complete</p>
+<p class="text-body-sm text-on-surface-variant">Pipeline successfully validated the patch.</p>
+</div>
+</div>
+</div>
+<script>
+        // Simple UI interaction logic
+        document.addEventListener('DOMContentLoaded', () => {
+            // Simulated success notification on page load for demo
+            setTimeout(() => {
+                const toast = document.getElementById('repair-success');
+                toast.style.transform = 'translateY(0)';
+                setTimeout(() => {
+                    toast.style.transform = 'translateY(150%)';
+                }, 4000);
+            }, 1000);
+        });
+    </script>
+</body></html>
