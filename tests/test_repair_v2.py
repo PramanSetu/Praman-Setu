@@ -136,6 +136,45 @@ def test_unit_rewrite_requires_file_target_when_code_unparseable() -> None:
     assert "SyntaxError" in result.failures[0]
 
 
+class _CleanHandler:
+    async def handle(self, request: RawInput):
+        return _processed(request.code, "execution_clean")
+
+
+async def test_repair_v2_neutralizes_background_thread_then_proceeds() -> None:
+    code = (
+        "import threading\n"
+        "def worker():\n"
+        "    while True:\n"
+        "        pass\n"
+        "for i in range(3):\n"
+        "    threading.Thread(target=worker).start()\n"
+    )
+    result = await repair_v2(
+        code, "app.py", handler=_CleanHandler(), fixer=Fixer(), security_scan=_secure, test_runner=_tests_pass
+    )
+
+    # Neutralized (daemonized) and validated rather than failing fast.
+    assert "daemon=True" in result.final_code
+    assert result.status == "clean"
+
+
+class _ExplodingHandler:
+    async def handle(self, request: RawInput):
+        raise AssertionError("handler should not run when the blocker can't be neutralized")
+
+
+async def test_repair_v2_fails_fast_when_cannot_neutralize() -> None:
+    # threading imported + a top-level .start() on a non-Thread => can't daemonize.
+    code = "import threading\nserver = make_server()\nserver.start()\n"
+    result = await repair_v2(code, "app.py", handler=_ExplodingHandler(), fixer=Fixer())
+
+    assert result.status == "unresolved"
+    assert result.passes == 0
+    assert "non-terminating" in (result.remaining_error or "").lower()
+    assert result.final_code == code
+
+
 async def test_repair_v2_applies_exact_edits_and_validates_clean() -> None:
     result = await repair_v2(
         BUGGY,

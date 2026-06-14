@@ -8,6 +8,7 @@ fallback/diagnostic path without making it the primary repair strategy.
 from __future__ import annotations
 
 import ast
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
@@ -19,6 +20,7 @@ from backend.input_handler.service import smart_input_handler
 from backend.llm.client import llm_client
 from backend.tools.bug_ledger import BugLedger, build_bug_ledger
 from backend.tools.diff_regression import scan_code
+from backend.tools.neutralize import neutralize_nontermination
 from backend.tools.patch_applier import ApplyResult, apply_unit_rewrites
 from backend.tools.sandbox.executor import SandboxResult
 from backend.tools.sandbox.pool import sandbox_pool
@@ -101,6 +103,50 @@ async def repair_v2(
     feedback = ""
     latest_processed: ProcessedInput | None = None
     latest_ledger: BugLedger | None = None
+
+    # Non-terminating top-level code (e.g. background threads started at import
+    # time) can never be run or validated headlessly — it hangs the sandbox until
+    # timeout, every pass. Detect it statically and try to NEUTRALIZE it
+    # deterministically (daemonize the workers so the process can exit), then let
+    # the normal pipeline repair the rest. If it can't be neutralized, fail fast
+    # with a clear, actionable finding instead of burning repeated timeouts.
+    pre_ledger = build_bug_ledger(code, None)
+    blockers = [issue for issue in pre_ledger.issues if issue.kind == "background_thread"]
+    if blockers:
+        neutralized, notes = neutralize_nontermination(code)
+        if neutralized != code:
+            current = neutralized
+            await _emit(
+                on_event,
+                "neutralize",
+                {"stage": "Bug Ledger", "notes": notes, "code": neutralized},
+            )
+        else:
+            await _emit(
+                on_event,
+                "input",
+                {
+                    "stage": "Smart Input Handler",
+                    "pass_number": 0,
+                    "status": "blocked",
+                    "error_type": "NonTerminating",
+                    "error_line": blockers[0].line,
+                    "error_message": blockers[0].message,
+                },
+            )
+            return _result(
+                "unresolved",
+                0,
+                code,
+                code,
+                pre_ledger,
+                attempts,
+                remaining=(
+                    "Non-terminating top-level code prevents safe execution and could not be "
+                    "neutralized automatically — "
+                    + "; ".join(f"line {b.line}: {b.message}" for b in blockers)
+                ),
+            )
 
     for pass_number in range(1, max_passes + 1):
         await _emit(
@@ -357,7 +403,17 @@ async def _validate_candidate(
         errors.append(f"compile failed at line {exc.lineno}: {exc.msg}")
         return errors
 
-    processed = await handler.handle(RawInput(code=code, filename=filename))
+    # Independent checks run concurrently (the warm pool holds 4 containers), so
+    # the validator's wall time is the slowest single check, not the sum — and a
+    # file with non-terminating code hits one sandbox timeout instead of several.
+    exec_task = asyncio.ensure_future(handler.handle(RawInput(code=code, filename=filename)))
+    sec_task = asyncio.ensure_future(security_scan(code))
+    gen_task = asyncio.ensure_future(test_runner(code, generated_tests)) if generated_tests.strip() else None
+
+    processed = await exec_task
+    security = await sec_task
+    gen_res = await gen_task if gen_task is not None else None
+
     if processed.status == "execution_timeout":
         errors.append("execution timed out")
     elif processed.status != "execution_clean":
@@ -366,14 +422,11 @@ async def _validate_candidate(
             f"{processed.error_line}: {processed.error_message}"
         )
 
-    security = await security_scan(code)
     if security:
         errors.append("security scan failed: " + "; ".join(security))
 
-    if generated_tests.strip():
-        test_result = await test_runner(code, generated_tests)
-        if test_result.exit_code != 0 or test_result.timed_out:
-            errors.append("generated tests failed: " + (test_result.stdout or test_result.stderr).strip()[:1000])
+    if gen_res is not None and (gen_res.exit_code != 0 or gen_res.timed_out):
+        errors.append("generated tests failed: " + (gen_res.stdout or gen_res.stderr).strip()[:1000])
 
     return errors
 
